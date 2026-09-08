@@ -75,11 +75,18 @@ export async function POST(req: NextRequest) {
       address, city, state, pincode, uploadedBy,
     } = body
 
+    // A user can type their own firm code; leave it blank and one is auto-generated. A
+    // manually chosen code is the user's explicit intent, so a collision there is reported
+    // back immediately rather than silently retried with a different code -- retrying would
+    // mean the firm ends up with a code the user never asked for. Auto-generation still
+    // retries on collision since there's no explicit intent to preserve.
+    const requestedFirmCode = typeof body.firmCode === 'string' ? body.firmCode.trim() : ''
+
     let id = ''
     let firmCode = ''
-    const MAX_ATTEMPTS = 5
+    const MAX_ATTEMPTS = requestedFirmCode ? 1 : 5
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      firmCode = await nextFirmCode()
+      firmCode = requestedFirmCode || await nextFirmCode()
       id = crypto.randomUUID()
       const conn = await getPool().getConnection()
       try {

@@ -15,6 +15,18 @@ export async function PUT(
       address, city, state, pincode, uploadedBy,
     } = body
 
+    const requestedFirmCode = typeof body.firmCode === 'string' ? body.firmCode.trim() : ''
+    if (requestedFirmCode) {
+      const conflict = await query<{ id: string }>(
+        `SELECT id FROM firm WHERE firmCode = ? AND id != ? AND isDeleted = 0`,
+        [requestedFirmCode, id]
+      )
+      if (conflict.length > 0) {
+        return NextResponse.json({ error: 'This firm code is already in use by another firm' }, { status: 409 })
+      }
+      await query(`UPDATE firm SET firmCode = ? WHERE id = ?`, [requestedFirmCode, id])
+    }
+
     await query(
       `UPDATE firm SET name=?, panNumber=?, gstNumber=?, cinNumber=?, gemSellerId=?, firmTypeCode=?, contactPerson=?, email=?, mobile=?, website=?, accountHolderName=?, accountNumber=?, ifscCode=?, bankName=? WHERE id=?`,
       [name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode, contactPerson, email, mobile, website, accountHolderName, accountNumber, ifscCode, bankName, id]
@@ -50,7 +62,12 @@ export async function PUT(
     dispatchNotification('Firm Updated', `Details for firm '${name}' have been updated.`, uploadedBy)
 
     return NextResponse.json(firm)
-  } catch {
+  } catch (e) {
+    const err = e as { code?: string; sqlMessage?: string; message?: string }
+    console.error('[PUT /api/firms/[id]] failed:', err.code, err.sqlMessage || err.message)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return NextResponse.json({ error: 'This firm code is already in use by another firm' }, { status: 409 })
+    }
     return NextResponse.json({ error: 'Failed to update firm' }, { status: 500 })
   }
 }

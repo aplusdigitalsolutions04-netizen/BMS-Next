@@ -88,6 +88,7 @@ export default function DocumentManagement() {
   const [editing,       setEditing]       = useState<FirmDocument | null>(null);
   const [viewDoc,       setViewDoc]       = useState<FirmDocument | null>(null);
   const [docToDelete,   setDocToDelete]   = useState<FirmDocument | null>(null);
+  const [saving,        setSaving]        = useState(false);
   const [searchQuery,   setSearchQuery]   = useState('');
   const [filterStatus,  setFilterStatus]  = useState<string>('all');
   const [filterCategory,setFilterCategory]= useState<string>('all');
@@ -251,6 +252,11 @@ export default function DocumentManagement() {
   async function handleSave() {
     if (!form.firmId)       { toast.error('Please select a Firm'); return; }
     if (!form.title.trim()) { toast.error('Document Title is required'); return; }
+    // A file upload can take several seconds (large PDF, slow connection to Drive) -- without
+    // this guard, a user re-clicking "Upload Document" while waiting fired a fresh POST every
+    // time, saving the same document 4-5 times over.
+    if (saving) return;
+    setSaving(true);
 
     try {
       const fd = new FormData();
@@ -306,7 +312,10 @@ export default function DocumentManagement() {
       setEditing(null);
     } catch (e) {
       console.error(e);
-      toast.error('Failed to save document');
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to save document';
+      toast.error(msg);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1090,13 +1099,13 @@ export default function DocumentManagement() {
           </div>
 
           <div className="flex gap-3">
-            <button onClick={closeModal}
-              className={`px-4 py-2.5 rounded-xl text-sm font-medium transition ${darkMode ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}>
+            <button onClick={closeModal} disabled={saving}
+              className={`px-4 py-2.5 rounded-xl text-sm font-medium transition disabled:opacity-40 disabled:cursor-not-allowed ${darkMode ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}>
               Cancel
             </button>
             {docStep > 1 && (
-              <button onClick={() => setDocStep(s => s - 1)}
-                className={`px-4 py-2.5 rounded-xl text-sm font-medium border transition ${darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+              <button onClick={() => setDocStep(s => s - 1)} disabled={saving}
+                className={`px-4 py-2.5 rounded-xl text-sm font-medium border transition disabled:opacity-40 disabled:cursor-not-allowed ${darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
                 Back
               </button>
             )}
@@ -1106,9 +1115,11 @@ export default function DocumentManagement() {
                 Next <ChevronRight size={16} />
               </button>
             ) : (
-              <button onClick={handleSave}
-                className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl text-sm font-semibold hover:shadow-lg transition">
-                <Check size={16} /> {editing ? 'Update Document' : 'Upload Document'}
+              <button onClick={handleSave} disabled={saving}
+                className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl text-sm font-semibold hover:shadow-lg transition disabled:opacity-60 disabled:cursor-not-allowed">
+                {saving
+                  ? <><Loader2 size={16} className="animate-spin" /> {editing ? 'Updating...' : 'Uploading...'}</>
+                  : <><Check size={16} /> {editing ? 'Update Document' : 'Upload Document'}</>}
               </button>
             )}
           </div>

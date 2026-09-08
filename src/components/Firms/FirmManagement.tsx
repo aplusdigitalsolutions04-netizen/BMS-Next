@@ -132,8 +132,12 @@ export default function FirmManagement() {
         return;
       }
       const firmTypeCode = selectedMasterData.code;
+      // Left blank, the server auto-generates the next code; typed in, it's the user's
+      // explicit choice and the server validates it's unique instead of silently swapping
+      // it for a generated one.
+      const firmCode = (formData as any).firmCode?.trim() || undefined;
       const payload = {
-        name: formData.name, panNumber: formData.panNumber, gstNumber: formData.gstNumber,
+        name: formData.name, firmCode, panNumber: formData.panNumber, gstNumber: formData.gstNumber,
         cinNumber: formData.cinNumber, gemSellerId: formData.gemSellerId, firmTypeCode,
         contactPerson: formData.contactPerson, email: formData.email, mobile: formData.mobile,
         website: formData.website, accountHolderName: formData.accountHolderName,
@@ -157,9 +161,7 @@ export default function FirmManagement() {
         logAudit({ userId: state.currentUser?.id || 'sys', userName: state.currentUser?.fullName || 'System', action: 'Update', module: 'Firms', details: `Updated firm '${mapped.name}'` }, dispatch);
         toast.success('Firm updated successfully');
       } else {
-        const res = await axios.post('/api/firms', {
-          ...payload, firmCode: (formData as any).firmCode || generateFirmCode(activeFirms),
-        });
+        const res = await axios.post('/api/firms', payload);
         const f = res.data;
         const mapped = { ...f, firmType: f.type?.value || formData.firmType, address: formData.address, city: formData.city, state: formData.state, pincode: formData.pincode };
         dispatch({ type: 'ADD_FIRM', payload: mapped });
@@ -318,6 +320,15 @@ export default function FirmManagement() {
               <div className="md:col-span-2">
                 <label className={lbl}>Firm Name <span className="text-red-500">*</span></label>
                 <input className={inp} value={formData.name || ''} onChange={e => setFormData({ ...formData, name: e.target.value })} placeholder="Enter full firm name" autoFocus />
+              </div>
+              <div>
+                <label className={lbl}>Firm Code</label>
+                <input
+                  className={`${inp} font-mono`}
+                  value={(formData as any).firmCode || ''}
+                  onChange={e => setFormData({ ...formData, firmCode: e.target.value.toUpperCase() } as any)}
+                  placeholder="e.g. FRM-005"
+                />
               </div>
               <div>
                 <label className={lbl}>Firm Type</label>
