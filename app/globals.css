@@ -1,0 +1,260 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────
+   GLOBAL UI POLISH
+   ───────────────────────────────────────────────────────── */
+
+/* Smooth, thin custom scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.dark *, .dark {
+  scrollbar-color: #475569 transparent;
+}
+.dark *::-webkit-scrollbar-thumb { background: #475569; }
+.dark *::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* Text selection highlight */
+::selection { background: #3b82f6; color: #fff; }
+
+/* Consistent focus ring for keyboard users */
+:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Page-level content entrance */
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-page-in { animation: pageIn 0.35s cubic-bezier(.22,.61,.36,1) both; }
+
+/* Staggered card entrance */
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-card-in { animation: cardIn 0.4s cubic-bezier(.22,.61,.36,1) both; }
+
+/* Skeleton loading shimmer */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: 0.75rem;
+}
+.dark .skeleton {
+  background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background-size: 800px 100%;
+}
+
+/* Soft notification badge pulse */
+@keyframes badgePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  50%      { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0); }
+}
+.animate-badge-pulse { animation: badgePulse 2s ease-in-out infinite; }
+
+/* Dropdown / popover entrance */
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-pop-in { animation: popIn 0.18s cubic-bezier(.22,.61,.36,1) both; }
+
+/* ── Login page animations ── */
+@keyframes fadeInLeft {
+  from { opacity: 0; transform: translateX(-40px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes zoomIn {
+  from { opacity: 0; transform: scale(0.88); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes heartBeat {
+  0%   { transform: scale(1); }
+  14%  { transform: scale(1.15); }
+  28%  { transform: scale(1); }
+  42%  { transform: scale(1.1); }
+  70%  { transform: scale(1); }
+}
+@keyframes backInRight {
+  0%   { opacity: 0; transform: translateX(60px) scale(0.7); }
+  80%  { opacity: 0.9; transform: translateX(0) scale(1.02); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes backInUp {
+  0%   { opacity: 0; transform: translateY(50px) scale(0.7); }
+  80%  { opacity: 0.9; transform: translateY(0) scale(1.02); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes pulse-blob {
+  0%, 100% { opacity: 0.2; transform: scale(1); }
+  50%       { opacity: 0.3; transform: scale(1.05); }
+}
+
+.animate-fade-in-left  { animation: fadeInLeft 0.7s ease both; }
+.animate-zoom-in       { animation: zoomIn 0.55s cubic-bezier(.22,.61,.36,1) both; }
+.animate-heart-beat    { animation: heartBeat 1.3s ease both; }
+.animate-back-in-right { animation: backInRight 0.65s cubic-bezier(.22,.61,.36,1) both; }
+.animate-back-in-up    { animation: backInUp 0.65s cubic-bezier(.22,.61,.36,1) both; }
+.animate-fade-in       { animation: fadeIn 0.7s ease both; }
+.animate-fade-in-delay { animation: fadeIn 0.7s ease 1s both; }
+.animate-pulse-blob    { animation: pulse-blob 3s ease-in-out infinite; }
+.animate-pulse-blob-delay { animation: pulse-blob 3s ease-in-out 0.7s infinite; }
+
+/* ─────────────────────────────────────────────────────────
+   bid-markdown  –  AI analysis summary rendering
+   Used in BidManagement.tsx for both analyzer & saved-bids
+   ───────────────────────────────────────────────────────── */
+.bid-markdown {
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: #374151;
+}
+
+/* Headings */
+.bid-markdown h1,
+.bid-markdown h2,
+.bid-markdown h3,
+.bid-markdown h4 {
+  font-weight: 700;
+  color: #111827;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+}
+.bid-markdown h2 {
+  font-size: 1.05rem;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 0.375rem;
+}
+.bid-markdown h3 { font-size: 0.9375rem; }
+.bid-markdown h4 { font-size: 0.875rem; color: #6b7280; }
+
+.bid-markdown > h2:first-child,
+.bid-markdown > h3:first-child { margin-top: 0; }
+
+/* Paragraphs */
+.bid-markdown p { margin-bottom: 0.625rem; }
+
+/* Inline */
+.bid-markdown strong { font-weight: 700; color: #111827; }
+.bid-markdown em     { font-style: italic; color: #6b7280; }
+
+/* Lists */
+.bid-markdown ul,
+.bid-markdown ol {
+  margin: 0 0 0.75rem 1.25rem;
+}
+.bid-markdown ul { list-style-type: disc; }
+.bid-markdown ol { list-style-type: decimal; }
+.bid-markdown li { margin-bottom: 0.2rem; }
+
+/* ── Tables – general ── */
+.bid-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+  font-size: 0.8125rem;
+}
+.bid-markdown th {
+  background: #f3f4f6;
+  font-weight: 600;
+  color: #374151;
+  text-align: left;
+  padding: 0.5rem 0.875rem;
+  border: 1px solid #d1d5db;
+  white-space: nowrap;
+}
+.bid-markdown td {
+  padding: 0.5rem 0.875rem;
+  border: 1px solid #e5e7eb;
+  vertical-align: top;
+  color: #4b5563;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.bid-markdown tr:nth-child(even) td { background: #f9fafb; }
+.bid-markdown tbody tr:hover td     { background: #eff6ff; }
+
+/* ── Two-column Field | Value table ── */
+.bid-markdown table.two-col-table th:first-child,
+.bid-markdown table.two-col-table td:first-child {
+  width: 38%;
+  font-weight: 600;
+  color: #1e3a5f;
+  background: #eff6ff;
+  white-space: normal;
+}
+.bid-markdown table.two-col-table td:last-child {
+  color: #1d4ed8;
+  font-weight: 500;
+}
+
+/* Code */
+.bid-markdown code {
+  background: #f3f4f6;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.25rem;
+  font-family: 'Courier New', monospace;
+  font-size: 0.8125rem;
+  color: #dc2626;
+}
+
+/* ─────────────────────────────────────────────────────────
+   DARK MODE  (.dark wrapper on the parent div)
+   ───────────────────────────────────────────────────────── */
+.dark .bid-markdown { color: #d1d5db; }
+
+.dark .bid-markdown h1,
+.dark .bid-markdown h2,
+.dark .bid-markdown h3,
+.dark .bid-markdown h4 { color: #f3f4f6; }
+.dark .bid-markdown h2  { border-bottom-color: #374151; }
+.dark .bid-markdown h4  { color: #9ca3af; }
+
+.dark .bid-markdown strong { color: #f9fafb; }
+.dark .bid-markdown em     { color: #9ca3af; }
+
+.dark .bid-markdown th {
+  background: #1f2937;
+  border-color: #374151;
+  color: #e5e7eb;
+}
+.dark .bid-markdown td {
+  border-color: #374151;
+  color: #9ca3af;
+}
+.dark .bid-markdown tr:nth-child(even) td { background: #111827; }
+.dark .bid-markdown tbody tr:hover td     { background: #1e293b; }
+
+.dark .bid-markdown table.two-col-table th:first-child,
+.dark .bid-markdown table.two-col-table td:first-child {
+  background: rgba(30, 58, 95, 0.25);
+  color: #93c5fd;
+}
+.dark .bid-markdown table.two-col-table td:last-child { color: #60a5fa; }
+
+.dark .bid-markdown code {
+  background: #1f2937;
+  color: #f87171;
+}

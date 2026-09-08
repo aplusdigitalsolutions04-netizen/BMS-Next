@@ -1,0 +1,243 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------
+// MASTER TABLES (READABLE DESIGN)
+// ---------------------------------------------------------
+
+model MasterGroup {
+  code        String       @id // e.g. "FIRM_TYPE", "DOC_CATEGORY"
+  name        String
+  description String?      @db.Text
+  isActive    Boolean      @default(true)
+  createdOn   DateTime     @default(now())
+
+  masterData  MasterData[]
+
+  @@map("mastergroup")
+}
+
+model MasterData {
+  code         String      @id // e.g. "PARTNERSHIP", "DOC_ACTIVE"
+  groupCode    String      // Reference to MasterGroup
+  value        String      // e.g. "Partnership", "Active"
+  sortOrder    Int         @default(0)
+  isActive     Boolean     @default(true)
+  metadata     String?     @db.Text
+
+  group        MasterGroup @relation(fields: [groupCode], references: [code], onDelete: Cascade)
+
+  // Relations back to entities
+  firmsAsType          Firm[]         @relation("FirmType")
+  docsAsCategory       DocumentMeta[] @relation("DocCategory")
+  docsAsDepartment     DocumentMeta[] @relation("DocDepartment")
+  docsAsStatus         DocumentMeta[] @relation("DocStatus")
+  usersAsRole          User[]         @relation("UserRole")
+
+  @@map("masterdata")
+}
+
+// ---------------------------------------------------------
+// FIRM (SPLIT DESIGN)
+// ---------------------------------------------------------
+
+model Firm {
+  id                String   @id @default(uuid())
+  firmCode          String   @unique
+  name              String
+  panNumber         String?
+  gstNumber         String?
+  cinNumber         String?
+  gemSellerId       String?
+  firmTypeCode      String   // Human readable foreign key, e.g. "PARTNERSHIP"
+  contactPerson     String?
+  email             String?
+  mobile            String?
+  website           String?
+  accountHolderName String?
+  accountNumber     String?
+  ifscCode          String?
+  bankName          String?
+  logoUrl           String?  @db.Text
+  remarks           String?  @db.Text
+  isActive          Boolean  @default(true)
+  isDeleted         Boolean  @default(false)
+  createdOn         DateTime @default(now())
+
+  type              MasterData    @relation("FirmType", fields: [firmTypeCode], references: [code])
+
+  addresses         Address[]
+  documents         Document[]
+  templates         Template[]
+
+  @@map("firm")
+}
+
+model Address {
+  id            String   @id @default(uuid())
+  firmId        String
+  addressLine   String   @db.Text
+  city          String?
+  state         String?
+  pincode       String?
+
+  firm          Firm     @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  @@map("address")
+}
+
+// ---------------------------------------------------------
+// DOCUMENT (SPLIT DESIGN)
+// ---------------------------------------------------------
+
+model Document {
+  id             String   @id @default(uuid())
+  firmId         String
+  title          String
+  documentNumber String
+  issueDate      DateTime?
+  expiryDate     DateTime?
+  isArchived     Boolean  @default(false)
+  isDeleted      Boolean  @default(false)
+  createdOn      DateTime @default(now())
+
+  firm           Firm     @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  meta           DocumentMeta?
+
+  @@map("document")
+}
+
+model DocumentMeta {
+  id             String   @id @default(uuid())
+  documentId     String   @unique
+  categoryCode   String?
+  departmentCode String?
+  statusCode     String?
+  description    String?  @db.Text
+  keywords       String?  @db.Text
+  fileName       String?
+  fileSize       Int?
+  fileType       String?
+  tags           String?  @db.Text
+  filePath       String?
+  uploadedBy     String?
+  uploadDate     DateTime @default(now())
+  version        Int      @default(1)
+
+  document       Document    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  category       MasterData? @relation("DocCategory",   fields: [categoryCode],   references: [code])
+  department     MasterData? @relation("DocDepartment", fields: [departmentCode], references: [code])
+  status         MasterData? @relation("DocStatus",     fields: [statusCode],     references: [code])
+
+  @@map("documentmeta")
+}
+
+// ---------------------------------------------------------
+// USER & SYSTEM
+// ---------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  password     String
+  fullName     String
+  email        String   @unique
+  roleCode     String
+  isActive     Boolean  @default(true)
+  isDeleted    Boolean  @default(false)
+  lastLogin    DateTime?
+  avatar       String?  @db.LongText
+  globalAccess       Boolean  @default(true)
+  firmAccess         String?  @db.Text
+  customPermissions  String?  @db.Text
+
+  role         MasterData @relation("UserRole", fields: [roleCode], references: [code])
+
+  @@map("user")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  userName  String
+  action    String
+  module    String
+  details   String   @db.Text
+  ipAddress String?
+  dateTime  DateTime @default(now())
+
+  @@map("auditlog")
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  title     String
+  message   String   @db.Text
+  type      String
+  isRead    Boolean  @default(false)
+  isDeleted Boolean  @default(false)
+  createdOn DateTime @default(now())
+  link      String?  @db.Text
+
+  @@map("notification")
+}
+
+// ---------------------------------------------------------
+// BID TEMPLATES
+// ---------------------------------------------------------
+model Template {
+  id               String   @id @default(uuid())
+  firmId           String?
+  name             String
+  content          String?  @db.LongText
+  headerFileName   String?
+  headerFilePath   String?
+  isActive         Boolean  @default(true)
+  isDeleted        Boolean  @default(false)
+  createdBy        String?
+  createdOn        DateTime @default(now())
+  updatedOn        DateTime @updatedAt
+
+  firm        Firm?    @relation(fields: [firmId], references: [id], onDelete: SetNull)
+
+  @@map("template")
+}
+
+// ---------------------------------------------------------
+// BIDS
+// ---------------------------------------------------------
+model BidDocument {
+  id               String   @id @default(uuid())
+  gemOrderId       String?
+  title            String
+  fileName         String
+  filePath         String
+  uploadedBy       String?
+  extractedSummary String?  @db.LongText
+  offeredProduct   String?  @db.Text
+  createdOn        DateTime @default(now())
+
+  parameters       BidParameter[]
+
+  @@map("biddocument")
+}
+
+model BidParameter {
+  id              Int      @id @default(autoincrement())
+  gemId           String   @map("gem_id")
+  parameterName   String   @map("parameter_name")
+  parameterValue  String?  @db.Text @map("parameter_value")
+  createdDate     DateTime @default(now()) @map("created_date")
+
+  bidDocumentId   String
+  bidDocument     BidDocument @relation(fields: [bidDocumentId], references: [id], onDelete: Cascade)
+
+  @@map("bid_parameters")
+}
