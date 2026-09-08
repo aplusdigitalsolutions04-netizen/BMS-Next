@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { query } from '@/lib/db'
 import { dispatchNotification } from '@/lib/email'
-import { saveUploadedFile, getFirmName } from '@/lib/uploads'
+import { saveUploadedFile, getFirmName, moveUploadedFileFolder } from '@/lib/uploads'
 
 export async function PUT(
   req: NextRequest,
@@ -24,10 +24,12 @@ export async function PUT(
     const uploadedBy = formData.get('uploadedBy') as string | null
     const tags = formData.get('tags') as string | null
     const file = formData.get('file') as File | null
+    const folderName = formData.get('folderName') as string | null
 
     const safeCategoryCode = categoryCode && categoryCode !== '' ? categoryCode : null
     const safeDepartmentCode = departmentCode && departmentCode !== '' ? departmentCode : null
     const safeStatusCode = statusCode && statusCode !== '' ? statusCode : null
+    const safeFolderName = folderName && folderName.trim() !== '' ? folderName.trim() : null
 
     const safeIssueDate = issueDate && issueDate !== 'null' ? new Date(issueDate) : null
     const safeExpiryDate = expiryDate && expiryDate !== 'null' ? new Date(expiryDate) : null
@@ -46,15 +48,29 @@ export async function PUT(
       keywords,
       tags,
       uploadedBy,
+      folderName: safeFolderName,
     }
 
     if (file && file.size > 0) {
       const companyName = await getFirmName(firmId)
-      const saved = await saveUploadedFile(file, 'file', { folder: 'document', companyName })
+      const saved = await saveUploadedFile(file, 'file', { folder: 'document', companyName, subFolder: safeFolderName })
       metaFields.fileName = saved.fileName
       metaFields.fileSize = saved.fileSize
       metaFields.fileType = saved.fileType
       metaFields.filePath = saved.filePath
+    } else {
+      // No new file this time -- if the folder changed, the existing Drive file still needs
+      // to be relocated to match, or the DB's folderName and the file's actual Drive location
+      // silently drift apart (exactly what this feature exists to prevent). The dedicated
+      // /move-folder endpoint already does this for its own flow; this covers the same change
+      // made through the regular Edit form instead.
+      const [currentMeta] = await query<{ fileName: string | null; folderName: string | null }>(
+        `SELECT fileName, folderName FROM documentmeta WHERE documentId = ?`, [id]
+      )
+      if (currentMeta?.fileName && currentMeta.folderName !== safeFolderName) {
+        const companyName = await getFirmName(firmId)
+        await moveUploadedFileFolder(currentMeta.fileName, 'document', companyName, safeFolderName)
+      }
     }
 
     const setClauses = Object.keys(metaFields).map(k => `${k}=?`).join(', ')
@@ -66,7 +82,7 @@ export async function PUT(
         f.id AS firm_id, f.name AS firm_name, f.firmCode AS firm_firmCode,
         dm.id AS meta_id, dm.categoryCode, dm.departmentCode, dm.statusCode,
         dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType,
-        dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version,
+        dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.folderName,
         dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
         cat.value AS cat_value, dept.value AS dept_value, stat.value AS stat_value
        FROM document d
@@ -100,6 +116,7 @@ export async function PUT(
         uploadedBy: docRow.uploadedBy,
         uploadDate: docRow.uploadDate,
         version: docRow.version,
+        folderName: docRow.folderName || null,
         approvalStatus: docRow.approvalStatus || 'APPROVED',
         approvedBy: docRow.approvedBy,
         approvedOn: docRow.approvedOn,

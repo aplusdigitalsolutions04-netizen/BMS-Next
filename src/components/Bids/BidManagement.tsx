@@ -55,20 +55,20 @@ export default function BidManagement() {
   // Bumped after a document is generated so BidDocumentsTab knows to refetch the currently open bid's docs
   const [docsRefreshTrigger, setDocsRefreshTrigger] = useState(0);
 
-  // Role-based visibility
+  // Role-based visibility -- these two are ordinary role permissions (toggled in Roles &
+  // Permissions), same as every other feature flag; there is no per-user override.
   const userRole = state.currentUser?.roleId || '';
-  const userCustomPerms: string[] = (() => {
-    try { return JSON.parse(state.currentUser?.customPermissions || '[]'); } catch { return []; }
-  })();
+  const roleAssigned = state.roles.find(r => r.id === userRole);
+  const rolePerms = roleAssigned?.permissions || [];
   const canSeeAssignee =
     userRole === 'ADMIN' ||
     userRole === 'MANAGER' ||
-    userCustomPerms.includes('show:assign-column');
+    rolePerms.includes('show:assign-column');
 
   const canEditBidParams =
     userRole === 'ADMIN' ||
     userRole === 'MANAGER' ||
-    userCustomPerms.includes('bid:edit-parameters');
+    rolePerms.includes('bid:edit-parameters');
 
   // BidManagement stays mounted across sidebar clicks between its own sub-tabs (all three
   // dispatch into this one component), so re-sync the local tab whenever the sidebar/dashboard

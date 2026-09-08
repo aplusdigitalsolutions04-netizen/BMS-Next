@@ -42,3 +42,6 @@ next-env.d.ts
 
 # archives
 *.zip
+
+# Claude Code session runtime state (not project source)
+.claude/scheduled_tasks.lock

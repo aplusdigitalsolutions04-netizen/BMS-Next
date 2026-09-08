@@ -586,7 +586,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             categoryCode?: string; departmentCode?: string; statusCode?: string;
             description?: string; tags?: string; keywords?: string; fileName?: string;
             fileSize?: number; fileType?: string; filePath?: string; uploadedBy?: string;
-            uploadDate?: string; version?: number;
+            uploadDate?: string; version?: number; folderName?: string | null;
             approvalStatus?: string; approvedBy?: string; approvedOn?: string; approvalNote?: string;
           };
         }) => ({
@@ -611,6 +611,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           uploadedBy: d.meta?.uploadedBy || '',
           uploadDate: d.meta?.uploadDate || d.createdOn,
           version: d.meta?.version || 1,
+          folderName: d.meta?.folderName || null,
           approvalStatus: (d.meta?.approvalStatus as 'PENDING' | 'APPROVED' | 'REJECTED') || 'APPROVED',
           approvedBy: d.meta?.approvedBy || null,
           approvedOn: d.meta?.approvedOn || null,

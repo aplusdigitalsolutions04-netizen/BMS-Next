@@ -126,6 +126,9 @@ export default function DirectLinkManagement() {
   const [filterLocation, setFilterLocation] = useState('');
   const [filterDateFrom, setFilterDateFrom] = useState('');
   const [filterDateTo, setFilterDateTo] = useState('');
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportScope, setExportScope] = useState<'all' | 'client'>('all');
+  const [exportClientCode, setExportClientCode] = useState('');
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -410,10 +413,8 @@ export default function DirectLinkManagement() {
 
   const paginatedEntries = filteredEntries.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
-  function exportToExcel() {
-    if (filteredEntries.length === 0) { toast.error('No entries to export'); return; }
-
-    const rows = filteredEntries.map(entry => ({
+  function buildExportRows(rowsIn: DirectLinkEntry[]) {
+    return rowsIn.map(entry => ({
       'Entry Date': entry.entryDate ? entry.entryDate.slice(0, 10) : '',
       'Product Name': entry.productName,
       'Link': entry.link || '',
@@ -434,11 +435,39 @@ export default function DirectLinkManagement() {
       'Order Status': entry.orderStatus || '',
       'Created By': entry.createdBy || '',
     }));
+  }
 
-    const worksheet = XLSX.utils.json_to_sheet(rows);
+  // Opens the "download all or a specific client" choice instead of exporting straight
+  // away -- exporting used to silently follow whatever the client filter happened to be
+  // left on, which was easy to get wrong (export "all" while a stale client filter was
+  // still active, or forget to filter and get everyone's data mixed together).
+  function openExportModal() {
+    if (filteredEntries.length === 0) { toast.error('No entries to export'); return; }
+    setExportScope('all');
+    setExportClientCode(filterClient || '');
+    setShowExportModal(true);
+  }
+
+  function runExport() {
+    let rowsToExport: DirectLinkEntry[];
+    let filenameSuffix: string;
+
+    if (exportScope === 'client') {
+      if (!exportClientCode) { toast.error('Please select a client'); return; }
+      rowsToExport = entries.filter(e => e.clientCode === exportClientCode);
+      if (rowsToExport.length === 0) { toast.error('No entries found for this client'); return; }
+      const name = clientName(exportClientCode).replace(/[^\w.\- ]/g, '_');
+      filenameSuffix = `-${name}`;
+    } else {
+      rowsToExport = filteredEntries;
+      filenameSuffix = '';
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(buildExportRows(rowsToExport));
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Direct Link');
-    XLSX.writeFile(workbook, `direct-link-entries-${todayStr()}.xlsx`);
+    XLSX.writeFile(workbook, `direct-link-entries${filenameSuffix}-${todayStr()}.xlsx`);
+    setShowExportModal(false);
   }
 
   const hasActiveFilters = !!(filterCategory || filterClient || filterLocation || filterDateFrom || filterDateTo);
@@ -464,7 +493,7 @@ export default function DirectLinkManagement() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={exportToExcel}
+            onClick={openExportModal}
             className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium border transition ${
               darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
             }`}
@@ -553,29 +582,29 @@ export default function DirectLinkManagement() {
             </thead>
             <tbody>
               {paginatedEntries.map((entry, idx) => (
-                <tr key={entry.id} className={`border-t ${darkMode ? 'border-gray-700 hover:bg-gray-700/30' : 'border-gray-100 hover:bg-blue-50/40'}`}>
+                <tr key={entry.id} className={`h-14 border-t ${darkMode ? 'border-gray-700 hover:bg-gray-700/30' : 'border-gray-100 hover:bg-blue-50/40'}`}>
                   <td className={`px-4 py-3 font-medium ${textSecondary}`}>{(currentPage - 1) * pageSize + idx + 1}</td>
                   <td className={`px-4 py-3 whitespace-nowrap ${textSecondary}`}>{formatDate(entry.entryDate)}</td>
                   <td className={`px-4 py-3 font-semibold ${textPrimary}`}>
-                    <div className="flex items-center gap-1.5">
-                      {entry.productName}
+                    <div className="flex items-center gap-1.5 max-w-[180px]">
+                      <span className="truncate" title={entry.productName}>{entry.productName}</span>
                       {entry.link && (
-                        <a href={entry.link} target="_blank" rel="noreferrer" className="text-blue-500 hover:text-blue-600">
+                        <a href={entry.link} target="_blank" rel="noreferrer" className="text-blue-500 hover:text-blue-600 flex-shrink-0">
                           <ExternalLink size={13} />
                         </a>
                       )}
                     </div>
                   </td>
-                  <td className={`px-4 py-3 ${textSecondary}`}>{entry.catalogId || '--'}</td>
-                  <td className={`px-4 py-3 ${textSecondary}`}>{categoryName(entry.itemCategoryCode)}</td>
-                  <td className={`px-4 py-3 ${textSecondary}`}>{entry.firmId ? firmName(entry.firmId) : (entry.firm || '--')}</td>
-                  <td className={`px-4 py-3 ${textSecondary}`}>{entry.clientCode ? clientName(entry.clientCode) : (entry.client || '--')}</td>
-                  <td className={`px-4 py-3 ${textSecondary}`}>{entry.sellerLocation || '--'}</td>
+                  <td className={`px-4 py-3 truncate max-w-[120px] ${textSecondary}`} title={entry.catalogId || ''}>{entry.catalogId || '--'}</td>
+                  <td className={`px-4 py-3 truncate max-w-[120px] ${textSecondary}`}>{categoryName(entry.itemCategoryCode)}</td>
+                  <td className={`px-4 py-3 truncate max-w-[140px] ${textSecondary}`} title={entry.firmId ? firmName(entry.firmId) : (entry.firm || '')}>{entry.firmId ? firmName(entry.firmId) : (entry.firm || '--')}</td>
+                  <td className={`px-4 py-3 truncate max-w-[140px] ${textSecondary}`} title={entry.clientCode ? clientName(entry.clientCode) : (entry.client || '')}>{entry.clientCode ? clientName(entry.clientCode) : (entry.client || '--')}</td>
+                  <td className={`px-4 py-3 truncate max-w-[140px] ${textSecondary}`} title={entry.sellerLocation || ''}>{entry.sellerLocation || '--'}</td>
                   <td className={`px-4 py-3 ${textSecondary}`}>
                     {parseTaggedLocations(entry.taggedLocations).length === 0 ? '--' : (
-                      <div className="flex flex-wrap gap-1 max-w-[180px] max-h-[52px] overflow-y-auto pr-1">
+                      <div className="flex flex-nowrap gap-1 max-w-[180px] overflow-x-auto">
                         {parseTaggedLocations(entry.taggedLocations).map(code => (
-                          <span key={code} className={`px-1.5 py-0.5 rounded-md text-xs flex-shrink-0 ${darkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+                          <span key={code} className={`px-1.5 py-0.5 rounded-md text-xs flex-shrink-0 whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
                             {locations.find(l => l.code === code)?.value || code}
                           </span>
                         ))}
@@ -635,6 +664,11 @@ export default function DirectLinkManagement() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {filteredEntries.length > 0 && (
+        <div className={`${cardBg} rounded-2xl border`}>
           <Pagination
             currentPage={currentPage}
             setCurrentPage={setCurrentPage}
@@ -868,6 +902,58 @@ export default function DirectLinkManagement() {
             {savingClient ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
             {savingClient ? 'Adding...' : 'Add Client'}
           </button>
+        </div>
+      </Modal>
+
+      <Modal isOpen={showExportModal} onClose={() => setShowExportModal(false)} title="Export to Excel" size="sm">
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${
+              exportScope === 'all'
+                ? (darkMode ? 'border-blue-600 bg-blue-900/20' : 'border-blue-400 bg-blue-50')
+                : (darkMode ? 'border-gray-700' : 'border-gray-200')
+            }`}>
+              <input type="radio" name="exportScope" checked={exportScope === 'all'} onChange={() => setExportScope('all')} className="accent-blue-600" />
+              <div>
+                <p className={`text-sm font-medium ${textPrimary}`}>All Entries</p>
+                <p className={`text-xs ${textSecondary}`}>
+                  {hasActiveFilters ? `The ${filteredEntries.length} entries matching your current filters` : `All ${entries.length} entries`}
+                </p>
+              </div>
+            </label>
+            <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${
+              exportScope === 'client'
+                ? (darkMode ? 'border-blue-600 bg-blue-900/20' : 'border-blue-400 bg-blue-50')
+                : (darkMode ? 'border-gray-700' : 'border-gray-200')
+            }`}>
+              <input type="radio" name="exportScope" checked={exportScope === 'client'} onChange={() => setExportScope('client')} className="accent-blue-600" />
+              <div>
+                <p className={`text-sm font-medium ${textPrimary}`}>Specific Client</p>
+                <p className={`text-xs ${textSecondary}`}>Every entry for one client, regardless of other filters</p>
+              </div>
+            </label>
+          </div>
+
+          {exportScope === 'client' && (
+            <div>
+              <label className={labelClass}>Client</label>
+              <select value={exportClientCode} onChange={e => setExportClientCode(e.target.value)} className={inputClass}>
+                <option value="">Select client...</option>
+                {clients.map(c => <option key={c.code} value={c.code}>{c.value}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-1">
+            <button onClick={() => setShowExportModal(false)}
+              className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition ${darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+              Cancel
+            </button>
+            <button onClick={runExport}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:shadow-lg transition">
+              <Download size={15} /> Export
+            </button>
+          </div>
         </div>
       </Modal>
 

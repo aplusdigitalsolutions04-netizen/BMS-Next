@@ -6,7 +6,7 @@ export async function GET() {
   try {
     const users = await query<Record<string, unknown>>(
       `SELECT u.id, u.username, u.fullName, u.email, u.roleCode, u.isActive, u.lastLogin, u.avatar,
-              u.globalAccess, u.firmAccess, u.customPermissions,
+              u.globalAccess, u.firmAccess,
               md.code AS role_code, md.value AS role_value, md.groupCode AS role_groupCode
        FROM user u
        LEFT JOIN masterdata md ON u.roleCode = md.code
@@ -25,7 +25,6 @@ export async function GET() {
       role: u.role_code ? { code: u.role_code, value: u.role_value, groupCode: u.role_groupCode } : null,
       globalAccess: (u.globalAccess as number) !== 0,
       firmAccess: u.firmAccess ?? null,
-      customPermissions: u.customPermissions ?? null,
     }))
 
     return NextResponse.json(result)
@@ -36,7 +35,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    const { username, password, fullName, email, roleCode, globalAccess, firmAccess, customPermissions } = await req.json()
+    const { username, password, fullName, email, roleCode, globalAccess, firmAccess } = await req.json()
     if (!username || !password) {
       return NextResponse.json({ error: 'Username and password are required' }, { status: 400 })
     }
@@ -64,16 +63,14 @@ export async function POST(req: NextRequest) {
 
     const isGlobal = globalAccess !== false
     const firmAccessJson = !isGlobal && firmAccess ? JSON.stringify(firmAccess) : null
-    const customPermsJson = Array.isArray(customPermissions) && customPermissions.length > 0
-      ? JSON.stringify(customPermissions) : null
 
     const id = crypto.randomUUID()
     const hashedPassword = await bcrypt.hash(password, 10)
 
     await query(
-      `INSERT INTO user (id, username, password, fullName, email, roleCode, isActive, globalAccess, firmAccess, customPermissions)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-      [id, username, hashedPassword, fullName, email, roleCode, isGlobal ? 1 : 0, firmAccessJson, customPermsJson]
+      `INSERT INTO user (id, username, password, fullName, email, roleCode, isActive, globalAccess, firmAccess)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      [id, username, hashedPassword, fullName, email, roleCode, isGlobal ? 1 : 0, firmAccessJson]
     )
 
     const [roleRow] = await query<Record<string, unknown>>(`SELECT code, value, groupCode FROM masterdata WHERE code = ?`, [roleCode])
@@ -83,7 +80,6 @@ export async function POST(req: NextRequest) {
       role: roleRow ? { code: roleRow.code, value: roleRow.value, groupCode: roleRow.groupCode } : null,
       globalAccess: isGlobal,
       firmAccess: firmAccessJson,
-      customPermissions: customPermsJson,
     }, { status: 201 })
   } catch (error) {
     console.error('Create user error:', error)

@@ -80,17 +80,17 @@ let buffer = '';
 child.stdout.on('data', (chunk) => {
   const text = chunk.toString();
   process.stdout.write(text);
-  buffer += text;
-  // Keep the buffer small -- we only ever need the most recent output to see the port
-  // and the "Ready" line.
-  if (buffer.length > 5000) buffer = buffer.slice(-5000);
+  // Once the port + "Ready" line have been found there's nothing left to scan for, so
+  // stop accumulating entirely -- growing (and truncating) the buffer forever was risking
+  // slicing the port/Ready text away before the match ever succeeded, if Next's startup
+  // banner happened to be long enough.
+  if (warmupStarted) return;
 
-  if (!warmupStarted) {
-    const portMatch = buffer.match(/http:\/\/localhost:(\d+)/);
-    if (portMatch && /Ready in/i.test(buffer)) {
-      warmupStarted = true;
-      runWarmup(Number(portMatch[1]));
-    }
+  buffer += text;
+  const portMatch = buffer.match(/http:\/\/localhost:(\d+)/);
+  if (portMatch && /Ready in/i.test(buffer)) {
+    warmupStarted = true;
+    runWarmup(Number(portMatch[1]));
   }
 });
 
@@ -100,25 +100,41 @@ async function runWarmup(port) {
   const start = Date.now();
   const queue = [...ROUTES];
   let ok = 0;
+  const failed = [];
 
   async function worker() {
     while (queue.length) {
       const route = queue.shift();
       try {
-        await fetch(base + route, { redirect: 'manual' });
-        ok++;
-      } catch {
-        // Best-effort -- a route failing to warm just means it'll compile on first real
-        // visit like before, not a hard failure worth stopping the dev server over.
+        const res = await fetch(base + route, { redirect: 'manual' });
+        // Any response at all -- including a 401 from an auth-gated API route, or a 405
+        // from a GET against a POST-only route -- means Next successfully compiled and ran
+        // the route; that's all warmup is trying to achieve. Only a 5xx (the route itself
+        // erroring out while handling the request) counts as a real warmup failure.
+        if (res.status >= 500) failed.push(`${route} (HTTP ${res.status})`);
+        else ok++;
+      } catch (err) {
+        failed.push(`${route} (${err.message})`);
       }
     }
   }
 
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   const seconds = ((Date.now() - start) / 1000).toFixed(1);
-  console.log(`[warmup] Done -- ${ok}/${ROUTES.length} routes compiled in ${seconds}s\n`);
+  console.log(`[warmup] Done -- ${ok}/${ROUTES.length} routes compiled in ${seconds}s` + (failed.length ? `, ${failed.length} failed` : '') + '\n');
+  if (failed.length) console.log('[warmup] Failed routes:\n  ' + failed.join('\n  ') + '\n');
 }
 
 child.on('exit', (code) => process.exit(code ?? 0));
-process.on('SIGINT', () => child.kill('SIGINT'));
-process.on('SIGTERM', () => child.kill('SIGTERM'));
+
+// child.kill() on POSIX delivers a real SIGINT/SIGTERM straight to `next`. On Windows,
+// `next.cmd` was spawned through a `shell: true` cmd.exe intermediary (see above) --
+// Windows has no real POSIX signals, and killing just that intermediary can leave the
+// actual `next dev` process (and the port it's holding) running behind it. `taskkill /T`
+// kills the whole process tree instead, so the port is reliably freed on Ctrl+C.
+function shutdown(signal) {
+  if (isWin) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+  else child.kill(signal);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

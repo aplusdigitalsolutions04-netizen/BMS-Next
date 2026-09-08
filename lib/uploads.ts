@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { query } from './db'
-import { uploadFileToDrive, deleteDriveFile, downloadDriveFile, updateDriveFileContent, findOrCreateFolder } from './googleDrive'
+import { uploadFileToDrive, deleteDriveFile, downloadDriveFile, updateDriveFileContent, findOrCreateFolder, moveDriveFile } from './googleDrive'
 
 // Kept only so pre-migration files that are still sitting on local disk keep working (the
 // serving route below falls back to this dir before checking Drive). New uploads never write
@@ -46,14 +46,27 @@ const DRIVE_FOLDERS: Record<string, string> = {
 // until later (a vendor responds to it), so there's no firm to nest it under at upload time.
 const FIRM_SCOPED_FOLDERS = new Set(['document', 'generatedDoc', 'template'])
 
-async function resolveParentFolderId(folder?: string, companyName?: string | null): Promise<string | undefined> {
+async function resolveParentFolderId(
+  folder?: string, companyName?: string | null, subFolder?: string | null
+): Promise<string | undefined> {
   const folderName = folder && DRIVE_FOLDERS[folder]
   if (!folderName) return undefined
+
+  let parentId: string
   if (companyName && folder && FIRM_SCOPED_FOLDERS.has(folder)) {
     const firmFolderId = await findOrCreateFolder(sanitizeFolderName(companyName))
-    return findOrCreateFolder(folderName, firmFolderId)
+    parentId = await findOrCreateFolder(folderName, firmFolderId)
+  } else {
+    parentId = await findOrCreateFolder(folderName)
   }
-  return findOrCreateFolder(folderName)
+
+  // User-named sub-folder (e.g. "Documents" -> "Renewal 2026") nested one level deeper --
+  // optional, so documents without one keep landing directly in the doc-type folder.
+  if (subFolder && subFolder.trim()) {
+    parentId = await findOrCreateFolder(sanitizeFolderName(subFolder.trim()), parentId)
+  }
+
+  return parentId
 }
 
 // Same filename convention the old disk-storage version used -- every caller stores this
@@ -65,7 +78,7 @@ async function resolveParentFolderId(folder?: string, companyName?: string | nul
 export async function saveUploadedFile(
   file: File,
   fieldName: string,
-  options: { folder?: string; companyName?: string | null } = {}
+  options: { folder?: string; companyName?: string | null; subFolder?: string | null } = {}
 ): Promise<{ fileName: string; filePath: string; fileSize: number; fileType: string }> {
   const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`
   const safe = sanitizeFilename(file.name)
@@ -73,7 +86,7 @@ export async function saveUploadedFile(
   const saveName = fieldName ? `${fieldName}-${unique}${ext}` : `${unique}-${safe}`
 
   const buffer = Buffer.from(await file.arrayBuffer())
-  await saveBufferAsUpload(buffer, saveName, file.type, options.folder, options.companyName)
+  await saveBufferAsUpload(buffer, saveName, file.type, options.folder, options.companyName, options.subFolder)
 
   return {
     fileName: file.name,
@@ -86,14 +99,30 @@ export async function saveUploadedFile(
 // Uploads a raw buffer to Drive under an already-decided filename and records it in
 // `drive_files`. Used by saveUploadedFile above, and by callers that build a file
 // server-side (e.g. a generated document's HTML) rather than receiving it from formData.
-export async function saveBufferAsUpload(buffer: Buffer, filename: string, mimetype?: string, folder?: string, companyName?: string | null) {
-  const parentFolderId = await resolveParentFolderId(folder, companyName)
+export async function saveBufferAsUpload(buffer: Buffer, filename: string, mimetype?: string, folder?: string, companyName?: string | null, subFolder?: string | null) {
+  const parentFolderId = await resolveParentFolderId(folder, companyName, subFolder)
   const driveFile = await uploadFileToDrive(buffer, filename, mimetype, parentFolderId)
   await query(
     'INSERT INTO drive_files (filename, driveFileId, mimetype, size) VALUES (?, ?, ?, ?)',
     [filename, driveFile.id, mimetype || null, buffer.length]
   )
   return { filename, size: buffer.length, mimetype }
+}
+
+// Moves a previously-uploaded file's Drive location to match a new folder/sub-folder --
+// used when a document is moved between folders in the app, so the actual Drive file follows
+// along instead of the DB record and the real file silently drifting apart. No-ops quietly if
+// the filename was never actually uploaded (a document with no file attached).
+export async function moveUploadedFileFolder(
+  filename: string | null | undefined, folder: string, companyName: string | null, subFolder: string | null
+) {
+  if (!filename) return
+  const safeName = path.basename(filename)
+  const rows = await query<{ driveFileId: string }>('SELECT driveFileId FROM drive_files WHERE filename = ?', [safeName])
+  if (!rows.length) return
+  const parentFolderId = await resolveParentFolderId(folder, companyName, subFolder)
+  if (!parentFolderId) return
+  await moveDriveFile(rows[0].driveFileId, parentFolderId)
 }
 
 // Overwrites a previously-uploaded file's content in place (same filename, same Drive file

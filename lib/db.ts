@@ -163,6 +163,19 @@ async function ensureTables() {
       id INT PRIMARY KEY,
       refreshToken TEXT NOT NULL,
       updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`,
+    // A firm's documents can be organized into folders -- created explicitly (via
+    // /api/document-folders) before any document is uploaded into them, so they show up as
+    // selectable even when empty. `folderName` on documentmeta stores the plain name (not
+    // this id) since that's also the Drive subfolder name -- see lib/uploads.ts.
+    `CREATE TABLE IF NOT EXISTS \`document_folder\` (
+      id VARCHAR(255) PRIMARY KEY,
+      firmId VARCHAR(255) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      createdBy VARCHAR(255),
+      isDeleted TINYINT(1) DEFAULT 0,
+      createdOn DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_firm (firmId)
     )`
   ];
 
@@ -211,6 +224,11 @@ async function ensureColumns() {
     // Tracks whether the "removing in 1 hour" reminder has already been sent for a pending
     // bid-linked document, so the approval-check cron doesn't email the same reminder twice.
     'ALTER TABLE `documentmeta` ADD COLUMN approvalReminderSent TINYINT(1) DEFAULT 0',
+    // Optional free-text folder a document is filed under within its firm -- lets a user
+    // organize a firm's documents (and the matching Drive subfolder) without needing a
+    // separate folders table; any existing value typed for that firm becomes a reusable
+    // suggestion in the upload form.
+    'ALTER TABLE `documentmeta` ADD COLUMN folderName VARCHAR(255)',
     // Direct Link step-2 fields (carting/order status)
     'ALTER TABLE `direct_link` ADD COLUMN cartingStatus TINYINT(1) DEFAULT 0',
     'ALTER TABLE `direct_link` ADD COLUMN cartingDate DATE',

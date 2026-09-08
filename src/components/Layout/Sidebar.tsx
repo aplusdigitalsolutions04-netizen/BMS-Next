@@ -140,15 +140,11 @@ export default function Sidebar() {
         {sections.map(section => {
           let items = menuItems.filter(m => m.section === section);
           
-          // Role-based access control
+          // Role-based access control -- feature access is configured only on the role
+          // (Roles & Permissions), never per-user.
           if (state.currentUser?.roleId !== 'ADMIN') {
-            let effectivePerms: string[] = [];
-            if (state.currentUser?.customPermissions) {
-              try { effectivePerms = JSON.parse(state.currentUser.customPermissions); } catch {}
-            } else {
-              const userRole = state.roles.find(r => r.id === state.currentUser?.roleId);
-              effectivePerms = userRole?.permissions || [];
-            }
+            const userRole = state.roles.find(r => r.id === state.currentUser?.roleId);
+            const effectivePerms = userRole?.permissions || [];
             items = items.filter(m =>
               m.id === 'dashboard' || effectivePerms.includes(`tab:${m.id}`)
             );

@@ -37,7 +37,7 @@ function getRoleMeta(roleId: string) {
   return ROLE_META[(roleId || '').toUpperCase()] || FALLBACK_META;
 }
 
-type ModalTab = 'profile' | 'features' | 'rules';
+type ModalTab = 'profile' | 'rules';
 
 export default function UserManagement() {
   const { state, dispatch } = useApp();
@@ -58,18 +58,6 @@ export default function UserManagement() {
   });
   const [globalAccess, setGlobalAccess] = useState(true);
   const [allowedFirms, setAllowedFirms] = useState<string[]>([]);
-  // null = use role defaults; string[] = custom overrides
-  const [customPerms, setCustomPerms] = useState<string[] | null>(null);
-
-  const ALL_ACTION_PERMS = ['create', 'edit', 'delete', 'view', 'download', 'upload', 'approve', 'archive'];
-  const SPECIAL_PERMS: { key: string; label: string; desc: string }[] = [
-    { key: 'show:assign-column', label: 'Assign Column', desc: 'Can view and use the "Assign To" column on bids' },
-    { key: 'bid:edit-parameters', label: 'Edit Bid Parameters', desc: 'Can edit extracted parameters after AI bid analysis' },
-  ];
-  const PERM_COLORS: Record<string, string> = {
-    create: '#3b82f6', edit: '#f59e0b', delete: '#ef4444', view: '#10b981',
-    download: '#06b6d4', upload: '#8b5cf6', approve: '#ec4899', archive: '#6b7280',
-  };
 
   //  Derived
   const filtered = users.filter(u => {
@@ -87,13 +75,6 @@ export default function UserManagement() {
   const paginatedUsers = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const selectedRole    = roles.find(r => r.id === form.roleId);
-  const rolePermissions = selectedRole?.permissions.filter(p => !p.startsWith('tab:')) || [];
-  const roleTabs        = selectedRole?.permissions.filter(p => p.startsWith('tab:')) || [];
-
-  // effective permissions shown in the tab (custom if set, else role defaults)
-  const effectivePerms: string[] = customPerms !== null
-    ? customPerms
-    : [...(selectedRole?.permissions || [])];
   const activeCount     = users.filter(u => u.isActive).length;
 
   //  Handlers 
@@ -102,7 +83,6 @@ export default function UserManagement() {
     setForm({ username: '', fullName: '', email: '', phone: '', roleId: roles[0]?.id || '', isActive: true, password: '' });
     setGlobalAccess(true);
     setAllowedFirms([]);
-    setCustomPerms(null);
     setModalTab('profile');
     setShowPwd(false);
     setShowModal(true);
@@ -114,24 +94,10 @@ export default function UserManagement() {
     const ga = user.globalAccess !== false;
     setGlobalAccess(ga);
     try { setAllowedFirms(ga ? [] : JSON.parse(user.firmAccess || '[]')); } catch { setAllowedFirms([]); }
-    try {
-      if (user.customPermissions) setCustomPerms(JSON.parse(user.customPermissions));
-      else setCustomPerms(null);
-    } catch { setCustomPerms(null); }
     setModalTab('profile');
     setShowPwd(false);
     setMenuOpen(null);
     setShowModal(true);
-  }
-
-  function togglePerm(perm: string) {
-    const base = customPerms !== null ? customPerms : (selectedRole?.permissions || []);
-    if (base.includes(perm)) setCustomPerms(base.filter(p => p !== perm));
-    else setCustomPerms([...base, perm]);
-  }
-
-  function resetToRoleDefaults() {
-    setCustomPerms(null);
   }
 
   function closeModal() { if (!submitting) setShowModal(false); }
@@ -152,7 +118,6 @@ export default function UserManagement() {
       const accessPayload = {
         globalAccess,
         firmAccess: globalAccess ? null : allowedFirms,
-        customPermissions: customPerms,
       };
       if (editing) {
         const res = await axios.put(`/api/users/${editing.id}`, {
@@ -208,7 +173,6 @@ export default function UserManagement() {
 
   const TABS: { id: ModalTab; label: string; count?: number }[] = [
     { id: 'profile',  label: 'Profile' },
-    { id: 'features', label: 'Feature Access', count: form.roleId.toUpperCase() === 'ADMIN' ? undefined : effectivePerms.length },
     { id: 'rules',    label: 'Data Rules' },
   ];
 
@@ -511,7 +475,7 @@ export default function UserManagement() {
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={closeModal} />
-          <div className={`relative w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col ${
+          <div className={`relative w-full max-w-3xl rounded-2xl shadow-2xl overflow-hidden flex flex-col ${
             darkMode ? 'bg-gray-800' : 'bg-white'
           }`} style={{ maxHeight: '90vh' }}>
 
@@ -664,154 +628,6 @@ export default function UserManagement() {
                 </div>
               )}
 
-              {/*  Feature Access Tab  */}
-              {modalTab === 'features' && (
-                <div className="space-y-4">
-                  {/* Header row */}
-                  <div className="flex items-center justify-between">
-                    <div className={`flex items-start gap-2 p-3 rounded-xl border flex-1 mr-3 ${
-                      darkMode ? 'bg-blue-900/20 border-blue-800/40 text-blue-300' : 'bg-blue-50 border-blue-100 text-blue-700'
-                    }`}>
-                      <Shield size={14} className="flex-shrink-0 mt-0.5" />
-                      <p className="text-xs leading-relaxed">
-                        {customPerms !== null
-                          ? <><strong>Custom permissions</strong> are active for this user.</>
-                          : <>Using <strong>{selectedRole?.name || 'role'}</strong> default permissions. Toggle below to override.</>}
-                      </p>
-                    </div>
-                    {customPerms !== null && (
-                      <button
-                        type="button"
-                        onClick={resetToRoleDefaults}
-                        className={`flex-shrink-0 text-xs px-3 py-2 rounded-lg border transition ${
-                          darkMode ? 'border-gray-600 text-gray-400 hover:bg-gray-700' : 'border-gray-300 text-gray-500 hover:bg-gray-50'
-                        }`}
-                      >
-                        Reset to Role
-                      </button>
-                    )}
-                  </div>
-
-                  {form.roleId.toUpperCase() === 'ADMIN' || form.roleId.toUpperCase() === 'ADMINISTRATOR' ? (
-                    <div className={`p-6 rounded-2xl border text-center ${darkMode ? 'border-emerald-800/40 bg-emerald-900/10' : 'border-emerald-100 bg-emerald-50'}`}>
-                      <Check size={32} className="mx-auto mb-2 text-emerald-500" />
-                      <p className="font-bold text-emerald-600">Full Access</p>
-                      <p className={`text-xs mt-1 ${textSecondary}`}>Administrator has unrestricted access to all features.</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      {/* Action Permissions — interactive toggles */}
-                      <div className={`rounded-2xl border overflow-hidden ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-                        <div className={`px-4 py-2.5 border-b flex items-center justify-between ${darkMode ? 'bg-gray-700/50 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                          <p className={`text-xs font-bold uppercase tracking-wider ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Action Permissions</p>
-                          <div className="flex gap-2">
-                            <button type="button" onClick={() => setCustomPerms(p => {
-                              const tabs = (p ?? effectivePerms).filter(x => x.startsWith('tab:'));
-                              return [...ALL_ACTION_PERMS, ...tabs];
-                            })} className="text-xs text-blue-500 hover:text-blue-600 font-medium">All</button>
-                            <span className={`text-xs ${textSecondary}`}>·</span>
-                            <button type="button" onClick={() => setCustomPerms(p => (p ?? effectivePerms).filter(x => x.startsWith('tab:')))}
-                              className={`text-xs font-medium ${textSecondary} hover:text-red-500`}>None</button>
-                          </div>
-                        </div>
-                        <div className="p-3 flex flex-wrap gap-2">
-                          {ALL_ACTION_PERMS.map(perm => {
-                            const active = effectivePerms.includes(perm);
-                            return (
-                              <button
-                                key={perm}
-                                type="button"
-                                onClick={() => togglePerm(perm)}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                                  active
-                                    ? 'text-white border-transparent'
-                                    : darkMode ? 'bg-gray-800 border-gray-700 text-gray-500' : 'bg-white border-gray-200 text-gray-400'
-                                }`}
-                                style={active ? { backgroundColor: PERM_COLORS[perm] } : undefined}
-                              >
-                                {active ? <Check size={11} /> : <X size={11} />}
-                                {perm.charAt(0).toUpperCase() + perm.slice(1)}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Module / Tab Access — interactive toggles */}
-                      <div className={`rounded-2xl border overflow-hidden ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-                        <div className={`px-4 py-2.5 border-b flex items-center justify-between ${darkMode ? 'bg-gray-700/50 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                          <p className={`text-xs font-bold uppercase tracking-wider ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Module Access</p>
-                          <div className="flex gap-2">
-                            <button type="button" onClick={() => setCustomPerms(p => {
-                              const actions = (p ?? effectivePerms).filter(x => !x.startsWith('tab:'));
-                              return [...actions, ...menuItems.map(m => `tab:${m.id}`)];
-                            })} className="text-xs text-blue-500 hover:text-blue-600 font-medium">All</button>
-                            <span className={`text-xs ${textSecondary}`}>·</span>
-                            <button type="button" onClick={() => setCustomPerms(p => (p ?? effectivePerms).filter(x => !x.startsWith('tab:')))}
-                              className={`text-xs font-medium ${textSecondary} hover:text-red-500`}>None</button>
-                          </div>
-                        </div>
-                        <div className="p-3 flex flex-wrap gap-2">
-                          {menuItems.map(item => {
-                            const permKey = `tab:${item.id}`;
-                            const active = effectivePerms.includes(permKey);
-                            return (
-                              <button
-                                key={item.id}
-                                type="button"
-                                onClick={() => togglePerm(permKey)}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                                  active
-                                    ? 'bg-indigo-500 text-white border-transparent'
-                                    : darkMode ? 'bg-gray-800 border-gray-700 text-gray-500' : 'bg-white border-gray-200 text-gray-400'
-                                }`}
-                              >
-                                {active ? <Check size={11} /> : <X size={11} />}
-                                {item.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Special Column Visibility */}
-                      <div className={`rounded-2xl border overflow-hidden ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-                        <div className={`px-4 py-2.5 border-b ${darkMode ? 'bg-gray-700/50 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                          <p className={`text-xs font-bold uppercase tracking-wider ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Column Visibility</p>
-                          <p className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Show or hide specific columns for this user</p>
-                        </div>
-                        <div className="p-3 space-y-2">
-                          {SPECIAL_PERMS.map(sp => {
-                            const active = effectivePerms.includes(sp.key);
-                            return (
-                              <div key={sp.key} className={`flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl border transition ${
-                                active
-                                  ? darkMode ? 'border-violet-700 bg-violet-900/20' : 'border-violet-200 bg-violet-50'
-                                  : darkMode ? 'border-gray-700 bg-gray-800/40' : 'border-gray-200 bg-white'
-                              }`}>
-                                <div className="min-w-0">
-                                  <p className={`text-xs font-semibold ${active ? (darkMode ? 'text-violet-300' : 'text-violet-700') : textPrimary}`}>{sp.label}</p>
-                                  <p className={`text-[11px] mt-0.5 ${textSecondary}`}>{sp.desc}</p>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => togglePerm(sp.key)}
-                                  className={`w-10 h-5 rounded-full flex-shrink-0 flex items-center p-0.5 transition-colors ${
-                                    active ? 'bg-violet-500' : darkMode ? 'bg-gray-600' : 'bg-gray-300'
-                                  }`}
-                                >
-                                  <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${active ? 'translate-x-5' : 'translate-x-0'}`} />
-                                </button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/*  Data Rules Tab  */}
               {modalTab === 'rules' && (
                 <div className="space-y-4">
@@ -928,7 +744,7 @@ export default function UserManagement() {
               <div className="flex items-center gap-2">
                 {modalTab !== 'rules' && (
                   <button
-                    onClick={() => setModalTab(modalTab === 'profile' ? 'features' : 'rules')}
+                    onClick={() => setModalTab('rules')}
                     className={`flex items-center gap-1 px-4 py-2.5 rounded-xl text-sm font-medium border transition ${
                       darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                     }`}

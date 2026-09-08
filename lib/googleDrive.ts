@@ -137,6 +137,25 @@ export async function updateDriveFileContent(fileId: string, buffer: Buffer, mim
   })
 }
 
+// Reparents a file to a different Drive folder -- Drive files don't have a single "path" to
+// update, moving one means adding the new parent and removing every old one. Used when a
+// document is moved between folders in the app, so the file's actual Drive location matches
+// what the app shows instead of just the DB record changing underneath it.
+export async function moveDriveFile(fileId: string, newParentId: string) {
+  const drive = await getDriveClient()
+  const current = await drive.files.get({ fileId, fields: 'parents', supportsAllDrives: true })
+  const previousParents = (current.data.parents || []).join(',')
+  await drive.files.update({
+    fileId,
+    addParents: newParentId,
+    // Omit removeParents entirely when there's nothing to remove (a file with no parents,
+    // which can happen in some Shared Drive states) -- passing an empty string here isn't
+    // "remove nothing", it's a malformed parameter that can make the whole request error.
+    ...(previousParents ? { removeParents: previousParents } : {}),
+    supportsAllDrives: true,
+  })
+}
+
 export async function downloadDriveFile(fileId: string): Promise<Buffer> {
   const drive = await getDriveClient()
   const res = await drive.files.get(

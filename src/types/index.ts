@@ -101,6 +101,7 @@ export interface FirmDocument {
   uploadedBy: string;
   uploadDate: string;
   version: number;
+  folderName?: string | null;
   isArchived: boolean;
   isDeleted: boolean;
   approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
@@ -137,7 +138,6 @@ export interface User {
   avatar: string;
   globalAccess?: boolean;
   firmAccess?: string | null;
-  customPermissions?: string | null;  // JSON array of permissions; null = use role defaults
 }
 
 export interface Role {
@@ -149,6 +149,7 @@ export interface Role {
 
 export type Permission =
   | 'create' | 'edit' | 'delete' | 'view' | 'download' | 'upload' | 'approve' | 'archive'
+  | 'show:assign-column' | 'bid:edit-parameters'
   | `tab:${string}`;
 
 export interface AuditLog {

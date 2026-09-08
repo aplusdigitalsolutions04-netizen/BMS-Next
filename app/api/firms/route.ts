@@ -47,35 +47,65 @@ export async function GET() {
   }
 }
 
+// The client suggests a firmCode (generated from whatever firm list it happens to have
+// loaded, which can be stale by up to the 30s poll interval), but firmCode is UNIQUE in the
+// DB -- trusting a possibly-stale client value caused silent duplicate-key failures whenever
+// two firms were created close together (two users, or the same user's list lagging behind
+// a firm someone else just added). The server now always computes it fresh from the DB
+// itself right before inserting, with a short retry loop as a last line of defense against
+// the (much smaller) race between two concurrent requests both reading the same max code.
+async function nextFirmCode(): Promise<string> {
+  // Let MySQL find the single highest code (indexed sort + LIMIT 1) instead of pulling every
+  // matching row across the network and reducing in JS -- this runs on every firm creation
+  // (and again on every retry attempt below), so it should stay cheap as the firm table grows.
+  const rows = await query<{ firmCode: string }>(
+    `SELECT firmCode FROM firm WHERE firmCode REGEXP '^FRM-[0-9]+$'
+     ORDER BY CAST(SUBSTRING(firmCode, 5) AS UNSIGNED) DESC LIMIT 1`
+  )
+  const maxNum = rows.length ? parseInt(rows[0].firmCode.slice(4), 10) : 0
+  return `FRM-${String(maxNum + 1).padStart(3, '0')}`
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
     const {
-      firmCode, name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode,
+      name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode,
       contactPerson, email, mobile, website, accountHolderName, accountNumber, ifscCode, bankName,
       address, city, state, pincode, uploadedBy,
     } = body
 
-    const id = crypto.randomUUID()
-    const conn = await getPool().getConnection()
-    await conn.beginTransaction()
-    try {
-      await conn.execute(
-        `INSERT INTO firm (id, firmCode, name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode, contactPerson, email, mobile, website, accountHolderName, accountNumber, ifscCode, bankName, isActive, isDeleted, createdOn)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NOW())`,
-        [id, firmCode, name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode, contactPerson, email, mobile, website, accountHolderName, accountNumber, ifscCode, bankName]
-      )
-      const addrId = crypto.randomUUID()
-      await conn.execute(
-        `INSERT INTO address (id, firmId, addressLine, city, state, pincode) VALUES (?, ?, ?, ?, ?, ?)`,
-        [addrId, id, address || '', city, state, pincode]
-      )
-      await conn.commit()
-    } catch (e) {
-      await conn.rollback()
-      throw e
-    } finally {
-      conn.release()
+    let id = ''
+    let firmCode = ''
+    const MAX_ATTEMPTS = 5
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      firmCode = await nextFirmCode()
+      id = crypto.randomUUID()
+      const conn = await getPool().getConnection()
+      try {
+        await conn.beginTransaction()
+        await conn.execute(
+          `INSERT INTO firm (id, firmCode, name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode, contactPerson, email, mobile, website, accountHolderName, accountNumber, ifscCode, bankName, isActive, isDeleted, createdOn)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NOW())`,
+          [id, firmCode, name, panNumber, gstNumber, cinNumber, gemSellerId, firmTypeCode, contactPerson, email, mobile, website, accountHolderName, accountNumber, ifscCode, bankName]
+        )
+        const addrId = crypto.randomUUID()
+        await conn.execute(
+          `INSERT INTO address (id, firmId, addressLine, city, state, pincode) VALUES (?, ?, ?, ?, ?, ?)`,
+          [addrId, id, address || '', city, state, pincode]
+        )
+        await conn.commit()
+        break // success
+      } catch (e) {
+        await conn.rollback()
+        const code = (e as { code?: string }).code
+        if (code === 'ER_DUP_ENTRY' && attempt < MAX_ATTEMPTS) {
+          continue // another request took this firmCode between our SELECT and INSERT -- retry with a fresh one
+        }
+        throw e
+      } finally {
+        conn.release()
+      }
     }
 
     const [firmRow] = await query<Record<string, unknown>>(
@@ -93,7 +123,19 @@ export async function POST(req: NextRequest) {
       .catch((err) => console.error('Email dispatch failed:', err))
 
     return NextResponse.json(firm, { status: 201 })
-  } catch {
+  } catch (e) {
+    // Was previously a bare `catch {}` -- swallowed the real reason entirely, which is
+    // exactly why "firm create isn't working" on the live site had no trace in the logs
+    // to diagnose from. Now it's recorded, and a duplicate/foreign-key error tells the
+    // caller something more useful than a blanket 500.
+    const err = e as { code?: string; sqlMessage?: string; message?: string }
+    console.error('[POST /api/firms] failed:', err.code, err.sqlMessage || err.message)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return NextResponse.json({ error: 'A firm with this code already exists -- please try again' }, { status: 409 })
+    }
+    if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.code === 'ER_NO_REFERENCED_ROW') {
+      return NextResponse.json({ error: 'Selected firm type is invalid or no longer exists' }, { status: 400 })
+    }
     return NextResponse.json({ error: 'Failed to create firm' }, { status: 500 })
   }
 }

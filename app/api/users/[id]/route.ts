@@ -8,7 +8,7 @@ export async function PUT(
 ) {
   try {
     const { id } = await params
-    const { fullName, email, roleCode, password, avatar, globalAccess, firmAccess, customPermissions } = await req.json()
+    const { fullName, email, roleCode, password, avatar, globalAccess, firmAccess } = await req.json()
 
     // Check email uniqueness
     if (email) {
@@ -46,17 +46,17 @@ export async function PUT(
       setValues.push(avatar)
     }
 
+    // Feature access is role-only now (see Roles & Permissions) -- there is no per-user
+    // override to persist here. `customPermissions` used to be written on every save
+    // whenever globalAccess was sent (which is always, since the form always includes it),
+    // which meant any edit to any user -- even just their name -- silently overwrote that
+    // column to null. Since nothing reads it anymore either, it's simplest to just stop
+    // touching it here rather than recompute a value nobody uses.
     const isGlobal = globalAccess !== undefined ? globalAccess !== false : undefined
-    const customPermsJson = Array.isArray(customPermissions) && customPermissions.length > 0
-      ? JSON.stringify(customPermissions) : null
-
     if (isGlobal !== undefined) {
       const firmAccessJson = !isGlobal && firmAccess ? JSON.stringify(firmAccess) : null
-      setParts.push('globalAccess=?', 'firmAccess=?', 'customPermissions=?')
-      setValues.push(isGlobal ? 1 : 0, firmAccessJson, customPermsJson)
-    } else if (customPermissions !== undefined) {
-      setParts.push('customPermissions=?')
-      setValues.push(customPermsJson)
+      setParts.push('globalAccess=?', 'firmAccess=?')
+      setValues.push(isGlobal ? 1 : 0, firmAccessJson)
     }
 
     if (setParts.length > 0) {
@@ -66,7 +66,7 @@ export async function PUT(
 
     const [userRow] = await query<Record<string, unknown>>(
       `SELECT u.id, u.username, u.fullName, u.email, u.roleCode, u.isActive, u.lastLogin, u.avatar,
-              u.globalAccess, u.firmAccess, u.customPermissions,
+              u.globalAccess, u.firmAccess,
               md.code AS role_code, md.value AS role_value, md.groupCode AS role_groupCode
        FROM user u LEFT JOIN masterdata md ON u.roleCode = md.code WHERE u.id = ?`,
       [id]
@@ -84,7 +84,6 @@ export async function PUT(
       role: userRow.role_code ? { code: userRow.role_code, value: userRow.role_value, groupCode: userRow.role_groupCode } : null,
       globalAccess: (userRow.globalAccess as number) !== 0,
       firmAccess: userRow.firmAccess ?? null,
-      customPermissions: userRow.customPermissions ?? null,
     })
   } catch (error) {
     console.error('Update user error:', error)

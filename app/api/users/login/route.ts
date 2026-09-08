@@ -60,7 +60,6 @@ export async function POST(req: NextRequest) {
       role: user.role_code ? { code: user.role_code, value: user.role_value, groupCode: user.role_groupCode } : null,
       globalAccess: (user.globalAccess as number) !== 0,
       firmAccess: user.firmAccess ?? null,
-      customPermissions: user.customPermissions ?? null,
       token,
     })
   } catch (error) {

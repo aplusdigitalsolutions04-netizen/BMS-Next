@@ -170,7 +170,8 @@ export default function FirmManagement() {
       setFormData(emptyFirm);
     } catch (e) {
       console.error(e);
-      toast.error('Failed to save firm');
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to save firm';
+      toast.error(msg);
     }
   }
 

@@ -27,17 +27,31 @@ function LoginScreen() {
   }, [router])
 
   const handleLogin = async () => {
-    try {
-      setLoading(true)
-      setError('')
-      const res = await axios.post('/api/users/login', { username, password })
-      const data = res.data
-      // Set Authorization header immediately -- before any protected API call
-      if (data.token) {
-        axios.defaults.headers.common['Authorization'] = `Bearer ${data.token}`
-      }
-      const user = { ...data, roleId: data.roleCode }
+    setLoading(true)
+    setError('')
 
+    // Only the credential check itself should ever produce "Invalid username or
+    // password" -- everything below this point runs after the server has already
+    // confirmed the login, so a failure there is never a wrong-password problem.
+    let data: any
+    try {
+      const res = await axios.post('/api/users/login', { username, password })
+      data = res.data
+    } catch {
+      setError('Invalid username or password')
+      Swal.fire('Oops!', 'Invalid username or password', 'error')
+      setLoading(false)
+      return
+    }
+
+    // Set Authorization header immediately -- before any protected API call
+    if (data.token) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${data.token}`
+    }
+    const user = { ...data, roleId: data.roleCode }
+
+    // Best-effort -- a failed audit log write must never block a successful login.
+    try {
       await logAudit(
         {
           userId: user.id,
@@ -48,12 +62,18 @@ function LoginScreen() {
         },
         dispatch
       )
+    } catch {
+      console.error('Failed to write login audit log')
+    }
 
-      // Show the success confirmation and wait for it to close before flipping
-      // isAuthenticated -- dispatching LOGIN first would trigger the root page's own
-      // redirect effect *and* this function's navigation at nearly the same moment,
-      // a race that was producing the blank-then-dashboard flash. Sequencing it this way
-      // means exactly one thing ever triggers the navigation.
+    // Show the success confirmation and wait for it to close before flipping
+    // isAuthenticated -- dispatching LOGIN first would trigger the root page's own
+    // redirect effect *and* this function's navigation at nearly the same moment,
+    // a race that was producing the blank-then-dashboard flash. Sequencing it this way
+    // means exactly one thing ever triggers the navigation. Best-effort like the audit
+    // log above -- the alert failing to render must never strand an authenticated user
+    // on the login screen.
+    try {
       await Swal.fire({
         title: 'Success!',
         text: 'Logged in successfully',
@@ -61,14 +81,12 @@ function LoginScreen() {
         timer: 1200,
         showConfirmButton: false,
       })
-
-      dispatch({ type: 'LOGIN', payload: user })
-      router.push('/dashboard')
     } catch {
-      setError('Invalid username or password')
-      Swal.fire('Oops!', 'Invalid username or password', 'error')
-      setLoading(false)
+      console.error('Failed to show login success alert')
     }
+
+    dispatch({ type: 'LOGIN', payload: user })
+    router.push('/dashboard')
   }
 
   const appName = String(state.systemSettings?.appName || branding.appName)

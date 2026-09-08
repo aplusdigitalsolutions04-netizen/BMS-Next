@@ -17,6 +17,14 @@ const permColors: Record<string, string> = {
   download: '#06b6d4', upload: '#8b5cf6', approve: '#ec4899', archive: '#6b7280',
 };
 
+// Narrow, feature-specific flags (as opposed to the CRUD-style ALL_PERMISSIONS above) --
+// toggled here on the role, same mechanism as everything else. There is no per-user override
+// for these (or anything else); every user's access comes entirely from their role.
+const SPECIAL_PERMISSIONS: { key: Permission; label: string; desc: string }[] = [
+  { key: 'show:assign-column', label: 'Assign Column', desc: 'View and use the "Assign To" column on bids' },
+  { key: 'bid:edit-parameters', label: 'Edit Bid Parameters', desc: 'Edit extracted parameters after AI bid analysis' },
+];
+
 // Display-only labels -- the underlying permission keys (e.g. "approve") stay the same so
 // existing role data isn't affected; "approve" specifically is renamed here since it's the
 // permission that gates the Document Approvals page, and "approve" alone read as too generic.
@@ -183,6 +191,29 @@ export default function RoleManagement() {
                       }`}>
                         {hasAccess ? <Check size={10} /> : <X size={10} />}
                         {item.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <p className={`text-xs font-medium uppercase tracking-wider mb-2 ${textSecondary}`}>Special Permissions</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {SPECIAL_PERMISSIONS.map(sp => {
+                    const hasAccess = role.permissions.includes(sp.key) || role.id === 'ADMIN';
+                    return (
+                      <span
+                        key={sp.key}
+                        onClick={() => role.id !== 'ADMIN' && handleTogglePermission(role, sp.key)}
+                        title={sp.desc}
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium ${role.id !== 'ADMIN' ? 'cursor-pointer transition-transform hover:scale-105' : 'cursor-not-allowed'} ${
+                        hasAccess
+                          ? 'bg-violet-500 text-white'
+                          : darkMode ? 'bg-gray-700 text-gray-500 line-through' : 'bg-gray-100 text-gray-400 line-through'
+                      }`}>
+                        {hasAccess ? <Check size={10} /> : <X size={10} />}
+                        {sp.label}
                       </span>
                     );
                   })}

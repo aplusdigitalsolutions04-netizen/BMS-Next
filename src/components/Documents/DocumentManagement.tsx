@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { useApp } from '../../store/AppContext';
 import { generateDocNumber, formatFileSize, getFileIcon } from '../../utils/helpers';
@@ -10,7 +10,8 @@ import type { FirmDocument, Firm } from '../../types';
 import {
   Plus, Upload, Search, Eye, Edit3, Trash2, Archive,
   RotateCcw, Download, FileText, X, Check, ChevronRight,
-  Tag, Settings2, Building2, ArrowLeft, Info, Phone, Mail, MapPin, Loader2,
+  Tag, Settings2, Building2, ArrowLeft, Info, Phone, Mail, MapPin, Loader2, FolderPlus,
+  Folder as FolderIcon, FolderInput, List, LayoutGrid,
 } from 'lucide-react';
 import { logAudit } from '../../utils/auditLogger';
 import toast from 'react-hot-toast';
@@ -68,6 +69,14 @@ export default function DocumentManagement() {
   const statuses      = masterGroups?.find(g => g.code === 'DOC_STATUS')?.masterData     || [];
   const defaultStatus = statuses.find(s => s.code === 'ACTIVE')?.code || '';
 
+  // Both the list and card views look up each document's firm/category/status while
+  // rendering every row -- building these once per render (instead of `.find()`ing the full
+  // array again for every single document) keeps that O(rows x firms/categories/statuses)
+  // rescan from growing with the document list.
+  const firmById     = useMemo(() => new Map(firms.map(f => [f.id, f])), [firms]);
+  const categoryByCode = useMemo(() => new Map(categories.map(c => [c.code, c])), [categories]);
+  const statusByCode  = useMemo(() => new Map(statuses.map(s => [s.code, s])), [statuses]);
+
   const fileInputRef     = useRef<HTMLInputElement>(null);
   const bulkFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -82,7 +91,25 @@ export default function DocumentManagement() {
   const [searchQuery,   setSearchQuery]   = useState('');
   const [filterStatus,  setFilterStatus]  = useState<string>('all');
   const [filterCategory,setFilterCategory]= useState<string>('all');
+  const [filterFolder,  setFilterFolder]  = useState<string>('all');
+  const [folders,        setFolders]        = useState<{ id: string; name: string }[]>([]);
+  const [showFolderModal,setShowFolderModal]= useState(false);
+  const [newFolderName,  setNewFolderName]  = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [movingDoc,      setMovingDoc]      = useState<FirmDocument | null>(null);
+  const [moveTarget,     setMoveTarget]     = useState('');
+  const [moving,         setMoving]         = useState(false);
   const [dragOver,      setDragOver]      = useState(false);
+  // List view is the default -- a table reads faster for scanning many documents at once;
+  // cards are opt-in via the toggle for anyone who prefers them. Persisted per-browser so the
+  // choice sticks across visits instead of resetting to list every time.
+  const [docViewMode, setDocViewMode] = useState<'list' | 'card'>(() => {
+    if (typeof window === 'undefined') return 'list';
+    return (localStorage.getItem('documentsViewMode') as 'list' | 'card') || 'list';
+  });
+  useEffect(() => {
+    try { localStorage.setItem('documentsViewMode', docViewMode); } catch {}
+  }, [docViewMode]);
 
   // Bulk upload
   const [showBulkModal,  setShowBulkModal]  = useState(false);
@@ -90,12 +117,13 @@ export default function DocumentManagement() {
   const [bulkUploading,  setBulkUploading]  = useState(false);
   const [bulkProgress,   setBulkProgress]   = useState(0);
   const [bulkResults,    setBulkResults]    = useState<{ name: string; ok: boolean; msg: string }[]>([]);
+  const [bulkFolderName, setBulkFolderName] = useState('');
 
   const emptyForm = {
     firmId: selectedFirmId || '', title: '', documentNumber: '',
     categoryId: '', departmentId: '', statusId: defaultStatus,
     issueDate: '', expiryDate: '', description: '',
-    tags: [] as string[], keywords: '',
+    tags: [] as string[], keywords: '', folderName: '',
     fileName: '', fileSize: 0, fileType: '', fileObj: null as File | null,
   };
   const [form, setForm] = useState(emptyForm);
@@ -103,6 +131,49 @@ export default function DocumentManagement() {
   // Only company/firm documents belong here -- AI-generated T&C docs and documents uploaded
   // against a bid (bidDocumentId set) live in the Bid Documents tab instead.
   const activeDocuments = documents.filter(d => !d.isDeleted && !d.fileName?.startsWith('generated_') && !d.bidDocumentId);
+
+  async function handleCreateFolder() {
+    if (!selectedFirm) return;
+    const name = newFolderName.trim();
+    if (!name) { toast.error('Folder name is required'); return; }
+    setCreatingFolder(true);
+    try {
+      await axios.post('/api/document-folders', {
+        firmId: selectedFirm, name,
+        createdBy: state.currentUser.fullName || state.currentUser.username,
+      });
+      toast.success('Folder created');
+      setNewFolderName('');
+      setShowFolderModal(false);
+      await fetchFolders(selectedFirm);
+    } catch (e) {
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to create folder';
+      toast.error(msg);
+    } finally {
+      setCreatingFolder(false);
+    }
+  }
+
+  function openMoveDoc(doc: FirmDocument) {
+    setMovingDoc(doc);
+    setMoveTarget(doc.folderName || '');
+  }
+
+  async function handleMoveDocument() {
+    if (!movingDoc) return;
+    setMoving(true);
+    try {
+      await axios.patch(`/api/documents/${movingDoc.id}/move-folder`, { folderName: moveTarget || null });
+      dispatch({ type: 'UPDATE_DOCUMENT', payload: { ...movingDoc, folderName: moveTarget || null } });
+      toast.success(moveTarget ? `Moved to "${moveTarget}"` : 'Removed from folder');
+      setMovingDoc(null);
+    } catch (e) {
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to move document';
+      toast.error(msg);
+    } finally {
+      setMoving(false);
+    }
+  }
 
   const filtered = activeDocuments.filter(d => {
     if (selectedFirm && d.firmId !== selectedFirm) return false;
@@ -112,6 +183,7 @@ export default function DocumentManagement() {
     if (filterStatus === 'archived' && !d.isArchived) return false;
     if (filterStatus === 'review'   && d.statusId !== 'PENDING_REVIEW') return false;
     if (filterCategory !== 'all'    && d.categoryId !== filterCategory) return false;
+    if (filterFolder !== 'all'      && (d.folderName || '') !== filterFolder) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       const firm = firms.find(f => f.id === d.firmId);
@@ -123,7 +195,24 @@ export default function DocumentManagement() {
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
-  useEffect(() => { setCurrentPage(1); }, [selectedFirm, filterStatus, filterCategory, searchQuery, pageSize]);
+  useEffect(() => { setCurrentPage(1); }, [selectedFirm, filterStatus, filterCategory, filterFolder, searchQuery, pageSize]);
+
+  // Folders are created explicitly (see the "New Folder" button below) rather than derived
+  // from documents, so an empty folder is still selectable when uploading -- refetch
+  // whenever the firm in view changes, and reset filter/state that no longer apply to it.
+  async function fetchFolders(firmId: string) {
+    try {
+      const res = await axios.get('/api/document-folders', { params: { firmId } });
+      setFolders(res.data);
+    } catch {
+      setFolders([]);
+    }
+  }
+  useEffect(() => {
+    setFilterFolder('all');
+    if (selectedFirm) fetchFolders(selectedFirm);
+    else setFolders([]);
+  }, [selectedFirm]);
   const paginated = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   function openAdd() {
@@ -139,7 +228,7 @@ export default function DocumentManagement() {
       firmId: doc.firmId, title: doc.title, documentNumber: doc.documentNumber,
       categoryId: doc.categoryId, departmentId: doc.departmentId, statusId: doc.statusId,
       issueDate: doc.issueDate, expiryDate: doc.expiryDate, description: doc.description,
-      tags: doc.tags, keywords: doc.keywords, fileName: doc.fileName,
+      tags: doc.tags, keywords: doc.keywords, folderName: doc.folderName || '', fileName: doc.fileName,
       fileSize: doc.fileSize, fileType: doc.fileType, fileObj: null,
     });
     setDocStep(1);
@@ -176,6 +265,7 @@ export default function DocumentManagement() {
       if (form.description)  fd.append('description', form.description);
       if (form.keywords)     fd.append('keywords',   form.keywords);
       if (form.tags?.length) fd.append('tags', form.tags.join(','));
+      if (form.folderName.trim()) fd.append('folderName', form.folderName.trim());
       fd.append('uploadedBy', state.currentUser.fullName || state.currentUser.username);
       if (form.fileObj) fd.append('file', form.fileObj);
 
@@ -193,6 +283,7 @@ export default function DocumentManagement() {
         fileName: d.meta?.fileName || '', fileSize: d.meta?.fileSize || 0, fileType: d.meta?.fileType || '',
         filePath: d.meta?.filePath || '', uploadedBy: d.meta?.uploadedBy || '',
         uploadDate: d.meta?.uploadDate || d.createdOn, version: d.meta?.version || 1,
+        folderName: d.meta?.folderName || null,
         isArchived: d.isArchived, isDeleted: d.isDeleted,
         approvalStatus: (d.meta?.approvalStatus as 'PENDING' | 'APPROVED' | 'REJECTED') || 'PENDING',
         approvedBy: d.meta?.approvedBy || null,
@@ -251,6 +342,7 @@ export default function DocumentManagement() {
     setBulkFiles([]);
     setBulkResults([]);
     setBulkProgress(0);
+    setBulkFolderName('');
     setShowBulkModal(true);
   }
 
@@ -270,6 +362,7 @@ export default function DocumentManagement() {
         fd.append('title', titleName);
         fd.append('documentNumber', generateDocNumber(state.documents));
         fd.append('statusCode', defaultStatus);
+        if (bulkFolderName.trim()) fd.append('folderName', bulkFolderName.trim());
         fd.append('uploadedBy', state.currentUser.fullName || state.currentUser.username);
         fd.append('file', file);
         const res = await axios.post('/api/documents', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
@@ -283,6 +376,7 @@ export default function DocumentManagement() {
           fileName: d.meta?.fileName || '', fileSize: d.meta?.fileSize || 0, fileType: d.meta?.fileType || '',
           filePath: d.meta?.filePath || '', uploadedBy: d.meta?.uploadedBy || '',
           uploadDate: d.meta?.uploadDate || d.createdOn, version: d.meta?.version || 1,
+          folderName: d.meta?.folderName || null,
           isArchived: d.isArchived, isDeleted: d.isDeleted,
           approvalStatus: (d.meta?.approvalStatus as 'PENDING' | 'APPROVED' | 'REJECTED') || 'PENDING',
           approvedBy: d.meta?.approvedBy || null,
@@ -441,6 +535,14 @@ export default function DocumentManagement() {
           >
             <Info size={16} /> Company Details
           </button>
+          <button
+            onClick={() => { setNewFolderName(''); setShowFolderModal(true); }}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium border transition ${
+              darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <FolderPlus size={16} /> New Folder
+          </button>
           <button onClick={openBulkModal} className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-xl text-sm font-medium hover:shadow-lg hover:shadow-violet-500/25 transition">
             <Upload size={16} /> Bulk Upload
           </button>
@@ -449,6 +551,49 @@ export default function DocumentManagement() {
           </button>
         </div>
       </div>
+
+      {/* Folders -- shown as its own section, above search/filters, so every folder created
+          for this firm is immediately visible (even with 0 documents in it yet) instead of
+          being buried as a small chip inside the filter panel below the search bar. */}
+      {folders.length > 0 && (
+        <div className={`${cardBg} rounded-2xl border p-4`}>
+          <p className={`text-xs font-semibold uppercase tracking-wider mb-3 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Folders</p>
+          <div className="flex flex-wrap gap-3">
+            <button onClick={() => setFilterFolder('all')}
+              className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition ${
+                filterFolder === 'all'
+                  ? (darkMode ? 'border-blue-500 bg-blue-900/20' : 'border-blue-400 bg-blue-50')
+                  : (darkMode ? 'border-gray-700 hover:bg-gray-700/40' : 'border-gray-200 hover:bg-gray-50')
+              }`}>
+              <FileText size={20} className={darkMode ? 'text-gray-400' : 'text-gray-500'} />
+              <div>
+                <p className={`text-sm font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>All Documents</p>
+                <p className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                  {activeDocuments.filter(d => d.firmId === selectedFirm).length} files
+                </p>
+              </div>
+            </button>
+            {folders.map(f => {
+              const count = activeDocuments.filter(d => d.firmId === selectedFirm && d.folderName === f.name).length;
+              const active = filterFolder === f.name;
+              return (
+                <button key={f.id} onClick={() => setFilterFolder(f.name)}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition ${
+                    active
+                      ? (darkMode ? 'border-blue-500 bg-blue-900/20' : 'border-blue-400 bg-blue-50')
+                      : (darkMode ? 'border-gray-700 hover:bg-gray-700/40' : 'border-gray-200 hover:bg-gray-50')
+                  }`}>
+                  <FolderIcon size={20} className={active ? 'text-blue-500' : (darkMode ? 'text-gray-400' : 'text-gray-500')} />
+                  <div>
+                    <p className={`text-sm font-medium truncate max-w-[160px] ${darkMode ? 'text-white' : 'text-gray-900'}`}>{f.name}</p>
+                    <p className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{count} files</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className={`${cardBg} rounded-2xl border p-4`}>
@@ -473,12 +618,99 @@ export default function DocumentManagement() {
         </div>
       </div>
 
-      {/* Cards */}
+      {/* View toggle */}
+      <div className="flex items-center justify-between">
+        <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{filtered.length} documents</p>
+        <div className={`flex items-center gap-1 p-1 rounded-xl border ${darkMode ? 'border-gray-700 bg-gray-800' : 'border-gray-200 bg-white'}`}>
+          <button onClick={() => setDocViewMode('list')} title="List view"
+            className={`p-1.5 rounded-lg transition ${docViewMode === 'list' ? 'bg-blue-600 text-white' : darkMode ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}>
+            <List size={16} />
+          </button>
+          <button onClick={() => setDocViewMode('card')} title="Card view"
+            className={`p-1.5 rounded-lg transition ${docViewMode === 'card' ? 'bg-blue-600 text-white' : darkMode ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}>
+            <LayoutGrid size={16} />
+          </button>
+        </div>
+      </div>
+
+      {/* List (default) */}
+      {docViewMode === 'list' && filtered.length > 0 && (
+        <div className={`${cardBg} rounded-2xl border overflow-hidden`}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className={`border-b text-left ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+                  <th className={`px-4 py-3 font-medium w-10 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>#</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Document</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Firm</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Folder</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Category</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Status</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Size</th>
+                  <th className={`px-4 py-3 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Uploaded</th>
+                  <th className={`px-4 py-3 font-medium text-right ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginated.map((doc, i) => {
+                  const firm     = firmById.get(doc.firmId);
+                  const category = categoryByCode.get(doc.categoryId);
+                  const status   = statusByCode.get(doc.statusId);
+                  return (
+                    <tr key={doc.id} className={`border-b last:border-b-0 group ${darkMode ? 'border-gray-700/60 hover:bg-gray-700/30' : 'border-gray-100 hover:bg-gray-50'}`}>
+                      <td className={`px-4 py-3 whitespace-nowrap ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                        {(currentPage - 1) * pageSize + i + 1}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="text-xl flex-shrink-0">{getFileIcon(doc.fileType)}</span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className={`font-medium truncate max-w-[220px] ${darkMode ? 'text-white' : 'text-gray-900'}`}>{doc.title}</p>
+                              {doc.gemOrderId && <Badge text={`GeM ID: ${doc.gemOrderId}`} color="#0ea5e9" />}
+                            </div>
+                            <p className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{doc.documentNumber}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className={`px-4 py-3 whitespace-nowrap ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{firm?.name || '--'}</td>
+                      <td className={`px-4 py-3 whitespace-nowrap ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{doc.folderName || '--'}</td>
+                      <td className={`px-4 py-3 whitespace-nowrap ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{category?.value || '--'}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">{status && <Badge text={status.value} color="#6366f1" />}</td>
+                      <td className={`px-4 py-3 whitespace-nowrap ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{formatFileSize(doc.fileSize)}</td>
+                      <td className={`px-4 py-3 whitespace-nowrap text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{doc.uploadedBy} - {doc.uploadDate}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <button onClick={() => setViewDoc(doc)} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}><Eye size={14} /></button>
+                          <button onClick={() => openEdit(doc)} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-blue-400' : 'hover:bg-blue-50 text-blue-500'}`}><Edit3 size={14} /></button>
+                          <button onClick={() => openMoveDoc(doc)} title="Move to folder" className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-violet-400' : 'hover:bg-violet-50 text-violet-500'}`}><FolderInput size={14} /></button>
+                          <button onClick={() => handleDownload(doc)} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-green-400' : 'hover:bg-green-50 text-green-500'}`}><Download size={14} /></button>
+                          {doc.isArchived ? (
+                            <button onClick={async () => { try { await axios.patch(`/api/documents/${doc.id}/archive`, { isArchived: false }); dispatch({ type: 'RESTORE_DOCUMENT', payload: doc.id }); toast.success('Restored'); } catch { toast.error('Failed'); } }}
+                              className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-amber-400' : 'hover:bg-amber-50 text-amber-500'}`}><RotateCcw size={14} /></button>
+                          ) : (
+                            <button onClick={async () => { try { await axios.patch(`/api/documents/${doc.id}/archive`, { isArchived: true }); dispatch({ type: 'ARCHIVE_DOCUMENT', payload: doc.id }); toast.success('Archived'); } catch { toast.error('Failed'); } }}
+                              className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}><Archive size={14} /></button>
+                          )}
+                          <button onClick={e => { e.stopPropagation(); setDocToDelete(doc); }} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-red-400' : 'hover:bg-red-50 text-red-500'}`}><Trash2 size={14} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Cards (opt-in) */}
+      {docViewMode === 'card' && (
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {paginated.map(doc => {
-          const firm         = firms.find(f => f.id === doc.firmId);
-          const category     = categories.find(c => c.code === doc.categoryId);
-          const status       = statuses.find(s => s.code === doc.statusId);
+          const firm         = firmById.get(doc.firmId);
+          const category     = categoryByCode.get(doc.categoryId);
+          const status       = statusByCode.get(doc.statusId);
           const docTags      = allTags.filter(t => doc.tags.includes(t.id));
           const tagColor     = docTags[0]?.color;
 
@@ -522,6 +754,9 @@ export default function DocumentManagement() {
               </div>
               <div className="mt-3 space-y-1.5">
                 <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}><span className="font-medium">Firm:</span> {firm?.name || '--'}</p>
+                {doc.folderName && (
+                  <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}><span className="font-medium">Folder:</span> {doc.folderName}</p>
+                )}
                 <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}><span className="font-medium">Category:</span> {category?.value || '--'}</p>
                 <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}><span className="font-medium">Size:</span> {formatFileSize(doc.fileSize)} - v{doc.version}</p>
                 {doc.expiryDate && (
@@ -535,9 +770,10 @@ export default function DocumentManagement() {
                 style={dividerStyle}
               >
                 <p className={`text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{doc.uploadedBy} - {doc.uploadDate}</p>
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                <div className="flex items-center gap-1">
                   <button onClick={() => setViewDoc(doc)} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}><Eye size={14} /></button>
                   <button onClick={() => openEdit(doc)} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-blue-400' : 'hover:bg-blue-50 text-blue-500'}`}><Edit3 size={14} /></button>
+                  <button onClick={() => openMoveDoc(doc)} title="Move to folder" className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-violet-400' : 'hover:bg-violet-50 text-violet-500'}`}><FolderInput size={14} /></button>
                   <button onClick={() => handleDownload(doc)} className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-green-400' : 'hover:bg-green-50 text-green-500'}`}><Download size={14} /></button>
                   {doc.isArchived ? (
                     <button onClick={async () => { try { await axios.patch(`/api/documents/${doc.id}/archive`, { isArchived: false }); dispatch({ type: 'RESTORE_DOCUMENT', payload: doc.id }); toast.success('Restored'); } catch { toast.error('Failed'); } }}
@@ -553,6 +789,7 @@ export default function DocumentManagement() {
           );
         })}
       </div>
+      )}
 
       {filtered.length === 0 && (
         <div className={`${cardBg} rounded-2xl border p-12 text-center`}>
@@ -728,6 +965,20 @@ export default function DocumentManagement() {
                 <input className={inp} value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Enter document title" />
               </div>
               <div>
+                <label className={lbl}>
+                  Folder <span className={optBadge}>optional</span>
+                </label>
+                <select className={inp} value={form.folderName} onChange={e => setForm({ ...form, folderName: e.target.value })}>
+                  <option value="">No Folder</option>
+                  {folders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                </select>
+                {folders.length === 0 && (
+                  <p className={`text-[11px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                    No folders yet for this firm -- use "New Folder" on the Documents page to create one.
+                  </p>
+                )}
+              </div>
+              <div>
                 <label className={lbl}>Status</label>
                 <select className={inp} value={form.statusId} onChange={e => setForm({ ...form, statusId: e.target.value })}>
                   <option value="">Select Status</option>
@@ -888,6 +1139,7 @@ export default function DocumentManagement() {
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 {([
                   ['Firm', firm?.name],
+                  ...(viewDoc.folderName ? [['Folder', viewDoc.folderName]] : []),
                   ...(category?.value ? [['Category', category.value]] : []),
                   ...(dept?.value ? [['Department', dept.value]] : []),
                   ['File Name', viewDoc.fileName],
@@ -936,6 +1188,77 @@ export default function DocumentManagement() {
       </Modal>
 
       {/*  Bulk Upload Modal  */}
+      {/* - New Folder Modal - */}
+      <Modal isOpen={showFolderModal} onClose={() => { if (!creatingFolder) setShowFolderModal(false); }} title="New Folder">
+        <div className="space-y-4">
+          <div>
+            <label className={lbl}>Folder Name</label>
+            <input
+              className={inp}
+              value={newFolderName}
+              onChange={e => setNewFolderName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleCreateFolder()}
+              placeholder="e.g. Renewal 2026"
+              autoFocus
+            />
+            <p className={`text-xs mt-1.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+              For {firms.find(f => f.id === selectedFirm)?.name || 'this firm'}. Once created, it'll be selectable when uploading a document.
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 pt-1">
+            <button
+              onClick={() => setShowFolderModal(false)}
+              disabled={creatingFolder}
+              className={`px-4 py-2.5 rounded-xl text-sm font-medium disabled:opacity-40 ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'}`}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreateFolder}
+              disabled={creatingFolder}
+              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl text-sm font-medium hover:shadow-lg transition disabled:opacity-50"
+            >
+              {creatingFolder ? <Loader2 size={15} className="animate-spin" /> : <FolderPlus size={15} />}
+              {creatingFolder ? 'Creating...' : 'Create Folder'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* - Move Document Modal - */}
+      <Modal isOpen={!!movingDoc} onClose={() => { if (!moving) setMovingDoc(null); }} title="Move Document">
+        <div className="space-y-4">
+          <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+            Moving <span className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>{movingDoc?.title}</span>
+            {movingDoc?.folderName ? <> out of <span className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>{movingDoc.folderName}</span></> : null}
+          </p>
+          <div>
+            <label className={lbl}>Move to</label>
+            <select className={inp} value={moveTarget} onChange={e => setMoveTarget(e.target.value)}>
+              <option value="">No Folder</option>
+              {folders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+            </select>
+          </div>
+          <div className="flex justify-end gap-3 pt-1">
+            <button
+              onClick={() => setMovingDoc(null)}
+              disabled={moving}
+              className={`px-4 py-2.5 rounded-xl text-sm font-medium disabled:opacity-40 ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'}`}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleMoveDocument}
+              disabled={moving || moveTarget === (movingDoc?.folderName || '')}
+              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl text-sm font-medium hover:shadow-lg transition disabled:opacity-50"
+            >
+              {moving ? <Loader2 size={15} className="animate-spin" /> : <FolderInput size={15} />}
+              {moving ? 'Moving...' : 'Move'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       <Modal isOpen={showBulkModal} onClose={() => { if (!bulkUploading) setShowBulkModal(false); }} title="Bulk Upload Documents" size="lg">
         <div className="space-y-5">
           {/* Firm info */}
@@ -948,6 +1271,19 @@ export default function DocumentManagement() {
               <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Files will be uploaded for this firm</p>
             </div>
           </div>
+
+          {/* Folder (optional) */}
+          {bulkResults.length === 0 && (
+            <div>
+              <label className={lbl}>
+                Folder <span className={optBadge}>optional</span>
+              </label>
+              <select className={inp} value={bulkFolderName} onChange={e => setBulkFolderName(e.target.value)}>
+                <option value="">No Folder</option>
+                {folders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+              </select>
+            </div>
+          )}
 
           {/* File picker */}
           {bulkResults.length === 0 && (

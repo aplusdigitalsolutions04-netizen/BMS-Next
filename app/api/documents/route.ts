@@ -11,7 +11,7 @@ export async function GET() {
         f.id AS firm_id, f.name AS firm_name, f.firmCode AS firm_firmCode,
         dm.id AS meta_id, dm.categoryCode, dm.departmentCode, dm.statusCode,
         dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType,
-        dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version,
+        dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.folderName,
         dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
         cat.value AS cat_value, dept.value AS dept_value, stat.value AS stat_value,
         bd.gemOrderId
@@ -56,6 +56,7 @@ export async function GET() {
         uploadedBy: row.uploadedBy,
         uploadDate: row.uploadDate,
         version: row.version,
+        folderName: row.folderName || null,
         approvalStatus: row.approvalStatus || 'APPROVED',
         approvedBy: row.approvedBy,
         approvedOn: row.approvedOn,
@@ -89,6 +90,7 @@ export async function POST(req: NextRequest) {
     const tags = formData.get('tags') as string | null
     const file = formData.get('file') as File | null
     const bidDocumentId = formData.get('bidDocumentId') as string | null
+    const folderName = formData.get('folderName') as string | null
 
     if (!title) {
       return NextResponse.json({ error: 'title is required.' }, { status: 400 })
@@ -100,11 +102,12 @@ export async function POST(req: NextRequest) {
     const safeCategoryCode = categoryCode && categoryCode !== '' ? categoryCode : null
     const safeDepartmentCode = departmentCode && departmentCode !== '' ? departmentCode : null
     const safeStatusCode = statusCode && statusCode !== '' ? statusCode : null
+    const safeFolderName = folderName && folderName.trim() !== '' ? folderName.trim() : null
 
     let fileName = null, fileSize = null, fileType = null, filePath = null
     if (file && file.size > 0) {
       const companyName = await getFirmName(firmId)
-      const saved = await saveUploadedFile(file, 'file', { folder: 'document', companyName })
+      const saved = await saveUploadedFile(file, 'file', { folder: 'document', companyName, subFolder: safeFolderName })
       fileName = saved.fileName
       fileSize = saved.fileSize
       fileType = saved.fileType
@@ -125,8 +128,8 @@ export async function POST(req: NextRequest) {
     const initialApprovalStatus = bidDocumentId ? 'PENDING' : 'APPROVED'
 
     await query(
-      `INSERT INTO documentmeta (id, documentId, categoryCode, departmentCode, statusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy, uploadDate, version, approvalStatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?)`,
-      [metaId, docId, safeCategoryCode, safeDepartmentCode, safeStatusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy || 'system', initialApprovalStatus]
+      `INSERT INTO documentmeta (id, documentId, categoryCode, departmentCode, statusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy, uploadDate, version, approvalStatus, folderName) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?, ?)`,
+      [metaId, docId, safeCategoryCode, safeDepartmentCode, safeStatusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy || 'system', initialApprovalStatus, safeFolderName]
     )
 
     // Fire-and-forget notification
@@ -154,7 +157,7 @@ export async function POST(req: NextRequest) {
     })()
 
     const [docRow] = await query<Record<string, unknown>>(
-      `SELECT d.*, dm.id AS meta_id, dm.categoryCode, dm.departmentCode, dm.statusCode, dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType, dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
+      `SELECT d.*, dm.id AS meta_id, dm.categoryCode, dm.departmentCode, dm.statusCode, dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType, dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.folderName, dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
         cat.value AS cat_value, dept.value AS dept_value, stat.value AS stat_value
        FROM document d
        LEFT JOIN documentmeta dm ON dm.documentId = d.id
@@ -185,6 +188,7 @@ export async function POST(req: NextRequest) {
         uploadedBy: docRow.uploadedBy,
         uploadDate: docRow.uploadDate,
         version: docRow.version,
+        folderName: docRow.folderName || null,
         approvalStatus: docRow.approvalStatus || 'APPROVED',
         approvedBy: docRow.approvedBy,
         approvedOn: docRow.approvedOn,
