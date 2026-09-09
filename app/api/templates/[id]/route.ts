@@ -59,7 +59,8 @@ export async function DELETE(
     const { id } = await params
     await query(`UPDATE template SET isDeleted = 1 WHERE id = ?`, [id])
     return NextResponse.json({ success: true })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to delete template' }, { status: 500 })
   }
 }

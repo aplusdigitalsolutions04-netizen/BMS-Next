@@ -38,7 +38,8 @@ export async function DELETE(
     const { groupCode, code } = await params
     await query(`UPDATE masterdata SET isDeleted = 1, isActive = 0 WHERE code = ? AND groupCode = ?`, [code, groupCode])
     return NextResponse.json({ success: true })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to delete master data' }, { status: 500 })
   }
 }

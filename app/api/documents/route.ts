@@ -2,9 +2,21 @@ import { NextRequest, NextResponse } from 'next/server'
 import { query } from '@/lib/db'
 import { dispatchNotification } from '@/lib/email'
 import { saveUploadedFile, getFirmName } from '@/lib/uploads'
+import { requireAuth } from '@/lib/auth'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuth(req)
+    if (auth instanceof NextResponse) return auth
+
+    // Same firm-scoping as GET /api/firms -- a firm-restricted user must not be able to pull
+    // every document by calling this endpoint directly.
+    const restrictToIds = !auth.isAdmin && !auth.globalAccess ? (auth.firmAccess || []) : null
+    if (restrictToIds && restrictToIds.length === 0) return NextResponse.json([])
+
+    const scopeSql = restrictToIds ? `AND d.firmId IN (${restrictToIds.map(() => '?').join(',')})` : ''
+    const scopeParams = restrictToIds || []
+
     const rows = await query<Record<string, unknown>>(`
       SELECT
         d.*,
@@ -13,6 +25,7 @@ export async function GET() {
         dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType,
         dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.folderName,
         dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
+        dm.extractedDate, dm.challanNumber, dm.extractedClientName, dm.productName, dm.quantity, dm.mrp,
         cat.value AS cat_value, dept.value AS dept_value, stat.value AS stat_value,
         bd.gemOrderId
       FROM document d
@@ -22,10 +35,10 @@ export async function GET() {
       LEFT JOIN masterdata cat ON dm.categoryCode = cat.code
       LEFT JOIN masterdata dept ON dm.departmentCode = dept.code
       LEFT JOIN masterdata stat ON dm.statusCode = stat.code
-      WHERE d.isDeleted = 0
+      WHERE d.isDeleted = 0 ${scopeSql}
       ORDER BY d.createdOn DESC
       LIMIT 1000
-    `)
+    `, scopeParams)
 
     const documents = rows.map(row => ({
       id: row.id,
@@ -61,6 +74,12 @@ export async function GET() {
         approvedBy: row.approvedBy,
         approvedOn: row.approvedOn,
         approvalNote: row.approvalNote,
+        extractedDate: row.extractedDate || null,
+        challanNumber: row.challanNumber || null,
+        extractedClientName: row.extractedClientName || null,
+        productName: row.productName || null,
+        quantity: row.quantity || null,
+        mrp: row.mrp ?? null,
         category: row.categoryCode ? { code: row.categoryCode, value: row.cat_value } : null,
         department: row.departmentCode ? { code: row.departmentCode, value: row.dept_value } : null,
         status: row.statusCode ? { code: row.statusCode, value: row.stat_value } : null,
@@ -68,7 +87,8 @@ export async function GET() {
     }))
 
     return NextResponse.json(documents)
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to fetch documents' }, { status: 500 })
   }
 }
@@ -91,6 +111,14 @@ export async function POST(req: NextRequest) {
     const file = formData.get('file') as File | null
     const bidDocumentId = formData.get('bidDocumentId') as string | null
     const folderName = formData.get('folderName') as string | null
+    // Optional challan-style fields, only meaningful for a document filed in a client-tagged
+    // folder -- see app/api/documents/extract/route.ts and the upload form.
+    const extractedDate = formData.get('extractedDate') as string | null
+    const challanNumber = formData.get('challanNumber') as string | null
+    const extractedClientName = formData.get('extractedClientName') as string | null
+    const productName = formData.get('productName') as string | null
+    const quantity = formData.get('quantity') as string | null
+    const mrp = formData.get('mrp') as string | null
 
     if (!title) {
       return NextResponse.json({ error: 'title is required.' }, { status: 400 })
@@ -103,6 +131,12 @@ export async function POST(req: NextRequest) {
     const safeDepartmentCode = departmentCode && departmentCode !== '' ? departmentCode : null
     const safeStatusCode = statusCode && statusCode !== '' ? statusCode : null
     const safeFolderName = folderName && folderName.trim() !== '' ? folderName.trim() : null
+    const safeExtractedDate = extractedDate && extractedDate.trim() !== '' ? new Date(extractedDate) : null
+    const safeChallanNumber = challanNumber && challanNumber.trim() !== '' ? challanNumber.trim() : null
+    const safeExtractedClientName = extractedClientName && extractedClientName.trim() !== '' ? extractedClientName.trim() : null
+    const safeProductName = productName && productName.trim() !== '' ? productName.trim() : null
+    const safeQuantity = quantity && quantity.trim() !== '' ? quantity.trim() : null
+    const safeMrp = mrp && mrp.trim() !== '' && !isNaN(Number(mrp)) ? Number(mrp) : null
 
     let fileName = null, fileSize = null, fileType = null, filePath = null
     if (file && file.size > 0) {
@@ -128,8 +162,8 @@ export async function POST(req: NextRequest) {
     const initialApprovalStatus = bidDocumentId ? 'PENDING' : 'APPROVED'
 
     await query(
-      `INSERT INTO documentmeta (id, documentId, categoryCode, departmentCode, statusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy, uploadDate, version, approvalStatus, folderName) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?, ?)`,
-      [metaId, docId, safeCategoryCode, safeDepartmentCode, safeStatusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy || 'system', initialApprovalStatus, safeFolderName]
+      `INSERT INTO documentmeta (id, documentId, categoryCode, departmentCode, statusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy, uploadDate, version, approvalStatus, folderName, extractedDate, challanNumber, extractedClientName, productName, quantity, mrp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [metaId, docId, safeCategoryCode, safeDepartmentCode, safeStatusCode, description, keywords, fileName, fileSize, fileType, tags, filePath, uploadedBy || 'system', initialApprovalStatus, safeFolderName, safeExtractedDate, safeChallanNumber, safeExtractedClientName, safeProductName, safeQuantity, safeMrp]
     )
 
     // Fire-and-forget notification
@@ -158,6 +192,7 @@ export async function POST(req: NextRequest) {
 
     const [docRow] = await query<Record<string, unknown>>(
       `SELECT d.*, dm.id AS meta_id, dm.categoryCode, dm.departmentCode, dm.statusCode, dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType, dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.folderName, dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
+        dm.extractedDate, dm.challanNumber, dm.extractedClientName, dm.productName, dm.quantity, dm.mrp,
         cat.value AS cat_value, dept.value AS dept_value, stat.value AS stat_value
        FROM document d
        LEFT JOIN documentmeta dm ON dm.documentId = d.id
@@ -193,6 +228,12 @@ export async function POST(req: NextRequest) {
         approvedBy: docRow.approvedBy,
         approvedOn: docRow.approvedOn,
         approvalNote: docRow.approvalNote,
+        extractedDate: docRow.extractedDate || null,
+        challanNumber: docRow.challanNumber || null,
+        extractedClientName: docRow.extractedClientName || null,
+        productName: docRow.productName || null,
+        quantity: docRow.quantity || null,
+        mrp: docRow.mrp ?? null,
         category: docRow.categoryCode ? { code: docRow.categoryCode, value: docRow.cat_value } : null,
         department: docRow.departmentCode ? { code: docRow.departmentCode, value: docRow.dept_value } : null,
         status: docRow.statusCode ? { code: docRow.statusCode, value: docRow.stat_value } : null,

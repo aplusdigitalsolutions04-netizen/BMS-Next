@@ -13,7 +13,8 @@ export async function POST() {
     const [notif] = await query<Record<string, unknown>>(`SELECT * FROM notification WHERE id = ?`, [id])
     await dispatchNotification('System Test Notification', message)
     return NextResponse.json(notif)
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to create test notification' }, { status: 500 })
   }
 }

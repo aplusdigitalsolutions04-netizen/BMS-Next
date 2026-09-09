@@ -37,15 +37,20 @@ export async function GET(
     const contentType = MIME_TYPES[ext] ?? 'application/octet-stream'
 
     // Pre-migration uploads (and anything the write-through cache below already fetched
-    // once) still live on local disk -- serve those directly.
-    if (fs.existsSync(filePath)) {
-      const file = fs.readFileSync(filePath)
-      return new NextResponse(file, {
+    // once) still live on local disk -- serve those directly. Read async: a sync readFileSync
+    // here blocks Node's single event loop thread for the whole read (multi-MB PDFs/images),
+    // serializing every other request the process is handling at that moment.
+    try {
+      const file = await fs.promises.readFile(filePath)
+      return new NextResponse(new Uint8Array(file), {
         headers: {
           'Content-Type': contentType,
           'Cache-Control': 'public, max-age=31536000, immutable',
         },
       })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      // File doesn't exist locally -- fall through to the Drive lookup below.
     }
 
     // Everything uploaded since the Google Drive migration is looked up here.

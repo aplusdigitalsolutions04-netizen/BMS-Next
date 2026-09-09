@@ -45,7 +45,8 @@ RULES:
     let result
     try {
       result = JSON.parse(completion.choices[0].message.content || '{}')
-    } catch {
+    } catch (e) {
+      console.error("API error:", e)
       return NextResponse.json({ error: 'AI response could not be parsed' }, { status: 500 })
     }
 

@@ -14,7 +14,8 @@ export async function POST() {
       }
     }
     return NextResponse.json({ message: 'Master groups seeded successfully' })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to seed master groups' }, { status: 500 })
   }
 }

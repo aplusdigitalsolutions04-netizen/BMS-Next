@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
+import * as XLSX from 'xlsx';
 import { useApp } from '../../store/AppContext';
 import { generateDocNumber, formatFileSize, getFileIcon } from '../../utils/helpers';
 import Modal from '../UI/Modal';
@@ -62,7 +63,7 @@ function StepIndicator({ current, darkMode }: { current: number; darkMode: boole
 //  Main Component 
 export default function DocumentManagement() {
   const { state, dispatch } = useApp();
-  const { darkMode, documents, firms, tags: allTags, selectedFirmId, masterGroups } = state;
+  const { darkMode, documents, firms, tags: allTags, selectedFirmId, masterGroups, clients } = state;
 
   const categories    = masterGroups?.find(g => g.code === 'DOC_CATEGORY')?.masterData   || [];
   const departments   = masterGroups?.find(g => g.code === 'DOC_DEPARTMENT')?.masterData || [];
@@ -92,11 +93,22 @@ export default function DocumentManagement() {
   const [searchQuery,   setSearchQuery]   = useState('');
   const [filterStatus,  setFilterStatus]  = useState<string>('all');
   const [filterCategory,setFilterCategory]= useState<string>('all');
-  const [filterFolder,  setFilterFolder]  = useState<string>('all');
-  const [folders,        setFolders]        = useState<{ id: string; name: string }[]>([]);
+  const [folders,        setFolders]        = useState<{ id: string; name: string; parentFolderId: string | null; clientCode: string | null; clientName?: string | null }[]>([]);
+  // Folder browsing is a tree: `currentFolderId` is where you're standing (null = the firm's
+  // root), and `showAllFiles` is the separate "ignore folders, show everything" flat view
+  // (the old "All Documents" tile) -- both can't be positionally the same state since "at
+  // root" and "show everything regardless of folder" need to be told apart.
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [showAllFiles,    setShowAllFiles]    = useState(true);
   const [showFolderModal,setShowFolderModal]= useState(false);
+  // Set when the New Folder modal is editing an existing folder rather than creating a new
+  // one -- same form, same modal, just a different id to PATCH instead of POST to.
+  const [editingFolderId,setEditingFolderId]= useState<string | null>(null);
   const [newFolderName,  setNewFolderName]  = useState('');
+  const [newFolderClient,setNewFolderClient]= useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [folderToDelete, setFolderToDelete] = useState<{ id: string; name: string } | null>(null);
+  const [deletingFolder, setDeletingFolder] = useState(false);
   const [movingDoc,      setMovingDoc]      = useState<FirmDocument | null>(null);
   const [moveTarget,     setMoveTarget]     = useState('');
   const [moving,         setMoving]         = useState(false);
@@ -126,32 +138,138 @@ export default function DocumentManagement() {
     issueDate: '', expiryDate: '', description: '',
     tags: [] as string[], keywords: '', folderName: '',
     fileName: '', fileSize: 0, fileType: '', fileObj: null as File | null,
+    // Challan-style fields, only shown/used when the chosen folder is client-tagged.
+    extractedDate: '', challanNumber: '', extractedClientName: '', productName: '', quantity: '', mrp: '',
   };
   const [form, setForm] = useState(emptyForm);
+  // null = not asked yet, true = user chose to extract (or extraction finished), false = user
+  // chose to skip. Reset whenever a new file is picked so re-attaching a file re-asks.
+  const [extractChoice, setExtractChoice] = useState<boolean | null>(null);
+  const [extracting, setExtracting] = useState(false);
 
   // Only company/firm documents belong here -- AI-generated T&C docs and documents uploaded
   // against a bid (bidDocumentId set) live in the Bid Documents tab instead.
   const activeDocuments = documents.filter(d => !d.isDeleted && !d.fileName?.startsWith('generated_') && !d.bidDocumentId);
 
-  async function handleCreateFolder() {
+  // A folder can nest inside another one -- a document's `folderName` stores its full "/"
+  // separated location (e.g. "Compliance/2024"), matching what lib/uploads.ts uses to build
+  // the equivalent nested Drive folder path. These helpers turn the flat `folders` list (each
+  // row just knows its own name + parentFolderId) into that path string, and back into a tree
+  // for the drill-down browser below.
+  const folderById = useMemo(() => new Map(folders.map(f => [f.id, f])), [folders]);
+  const folderPathMap = useMemo(() => {
+    const map = new Map<string, string>();
+    const resolve = (id: string): string => {
+      if (map.has(id)) return map.get(id)!;
+      const f = folderById.get(id);
+      if (!f) return '';
+      const path = f.parentFolderId ? `${resolve(f.parentFolderId)}/${f.name}` : f.name;
+      map.set(id, path);
+      return path;
+    };
+    folders.forEach(f => resolve(f.id));
+    return map;
+  }, [folders, folderById]);
+  const folderPath = (id: string | null): string => (id ? folderPathMap.get(id) || '' : '');
+  const currentFolderPath = folderPath(currentFolderId);
+  const childFolders = useMemo(
+    () => folders.filter(f => (f.parentFolderId || null) === currentFolderId),
+    [folders, currentFolderId]
+  );
+  // Ancestor chain from the firm root down to the folder currently being browsed, for the
+  // breadcrumb trail.
+  const breadcrumbChain = useMemo(() => {
+    const chain: { id: string; name: string }[] = [];
+    let cur = currentFolderId ? folderById.get(currentFolderId) : undefined;
+    while (cur) {
+      chain.unshift({ id: cur.id, name: cur.name });
+      cur = cur.parentFolderId ? folderById.get(cur.parentFolderId) : undefined;
+    }
+    return chain;
+  }, [currentFolderId, folderById]);
+  // Every folder as a flat, depth-indented option for the plain <select> pickers (upload
+  // form, move dialog, bulk upload) -- these let you file a document anywhere in the tree
+  // directly, without having to browse into it first.
+  const folderOptions = useMemo(
+    () => folders
+      .map(f => ({ id: f.id, name: f.name, clientName: f.clientName || null, path: folderPathMap.get(f.id) || f.name, depth: (folderPathMap.get(f.id) || '').split('/').length - 1 }))
+      .sort((a, b) => a.path.localeCompare(b.path)),
+    [folders, folderPathMap]
+  );
+  // Whether the folder currently chosen in the upload form is tagged to a specific client --
+  // that's what triggers the "extract data from this document?" prompt.
+  const selectedFolderClientName = form.folderName
+    ? folderOptions.find(f => f.path === form.folderName)?.clientName || null
+    : null;
+
+  function openEditFolder(f: { id: string; name: string; clientCode: string | null }) {
+    setEditingFolderId(f.id);
+    setNewFolderName(f.name);
+    setNewFolderClient(f.clientCode || '');
+    setShowFolderModal(true);
+  }
+
+  async function handleSaveFolder() {
     if (!selectedFirm) return;
     const name = newFolderName.trim();
     if (!name) { toast.error('Folder name is required'); return; }
     setCreatingFolder(true);
     try {
-      await axios.post('/api/document-folders', {
-        firmId: selectedFirm, name,
-        createdBy: state.currentUser.fullName || state.currentUser.username,
-      });
-      toast.success('Folder created');
+      if (editingFolderId) {
+        const oldPath = folderPath(editingFolderId);
+        await axios.patch(`/api/document-folders/${editingFolderId}`, {
+          firmId: selectedFirm, name, clientCode: newFolderClient || null,
+        });
+        toast.success('Folder updated');
+        // Renaming doesn't move a folder, so its parent segment is unchanged -- only the
+        // last path segment (its own name) does. Patch every already-loaded document whose
+        // folderName carried the old path (exactly, or as a subfolder prefix) so the list
+        // reflects the new name immediately instead of waiting for the next 30s poll.
+        const parentPath = oldPath.includes('/') ? oldPath.slice(0, oldPath.lastIndexOf('/')) : '';
+        const newPath = parentPath ? `${parentPath}/${name}` : name;
+        if (newPath !== oldPath) {
+          documents.forEach(d => {
+            if (d.folderName === oldPath) {
+              dispatch({ type: 'UPDATE_DOCUMENT', payload: { ...d, folderName: newPath } });
+            } else if (d.folderName && d.folderName.startsWith(`${oldPath}/`)) {
+              dispatch({ type: 'UPDATE_DOCUMENT', payload: { ...d, folderName: newPath + d.folderName.slice(oldPath.length) } });
+            }
+          });
+        }
+      } else {
+        await axios.post('/api/document-folders', {
+          firmId: selectedFirm, name, parentFolderId: currentFolderId,
+          clientCode: newFolderClient || null,
+          createdBy: state.currentUser.fullName || state.currentUser.username,
+        });
+        toast.success('Folder created');
+      }
       setNewFolderName('');
+      setNewFolderClient('');
+      setEditingFolderId(null);
       setShowFolderModal(false);
       await fetchFolders(selectedFirm);
     } catch (e) {
-      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to create folder';
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : `Failed to ${editingFolderId ? 'update' : 'create'} folder`;
       toast.error(msg);
     } finally {
       setCreatingFolder(false);
+    }
+  }
+
+  async function handleDeleteFolder() {
+    if (!folderToDelete || !selectedFirm) return;
+    setDeletingFolder(true);
+    try {
+      await axios.delete(`/api/document-folders/${folderToDelete.id}`, { params: { firmId: selectedFirm } });
+      toast.success('Folder deleted');
+      setFolderToDelete(null);
+      await fetchFolders(selectedFirm);
+    } catch (e) {
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to delete folder';
+      toast.error(msg);
+    } finally {
+      setDeletingFolder(false);
     }
   }
 
@@ -184,7 +302,7 @@ export default function DocumentManagement() {
     if (filterStatus === 'archived' && !d.isArchived) return false;
     if (filterStatus === 'review'   && d.statusId !== 'PENDING_REVIEW') return false;
     if (filterCategory !== 'all'    && d.categoryId !== filterCategory) return false;
-    if (filterFolder !== 'all'      && (d.folderName || '') !== filterFolder) return false;
+    if (!showAllFiles               && (d.folderName || '') !== currentFolderPath) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       const firm = firms.find(f => f.id === d.firmId);
@@ -196,7 +314,7 @@ export default function DocumentManagement() {
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
-  useEffect(() => { setCurrentPage(1); }, [selectedFirm, filterStatus, filterCategory, filterFolder, searchQuery, pageSize]);
+  useEffect(() => { setCurrentPage(1); }, [selectedFirm, filterStatus, filterCategory, currentFolderId, showAllFiles, searchQuery, pageSize]);
 
   // Folders are created explicitly (see the "New Folder" button below) rather than derived
   // from documents, so an empty folder is still selectable when uploading -- refetch
@@ -210,7 +328,8 @@ export default function DocumentManagement() {
     }
   }
   useEffect(() => {
-    setFilterFolder('all');
+    setShowAllFiles(true);
+    setCurrentFolderId(null);
     if (selectedFirm) fetchFolders(selectedFirm);
     else setFolders([]);
   }, [selectedFirm]);
@@ -218,7 +337,10 @@ export default function DocumentManagement() {
 
   function openAdd() {
     setEditing(null);
-    setForm({ ...emptyForm, firmId: selectedFirm || '', documentNumber: generateDocNumber(state.documents) });
+    // Default to whatever folder is currently being browsed, so uploading from inside
+    // "Compliance/2024" doesn't drop the file back at the root by default.
+    setForm({ ...emptyForm, firmId: selectedFirm || '', documentNumber: generateDocNumber(state.documents), folderName: !showAllFiles ? currentFolderPath : '' });
+    setExtractChoice(null);
     setDocStep(1);
     setShowModal(true);
   }
@@ -231,7 +353,14 @@ export default function DocumentManagement() {
       issueDate: doc.issueDate, expiryDate: doc.expiryDate, description: doc.description,
       tags: doc.tags, keywords: doc.keywords, folderName: doc.folderName || '', fileName: doc.fileName,
       fileSize: doc.fileSize, fileType: doc.fileType, fileObj: null,
+      extractedDate: doc.extractedDate || '', challanNumber: doc.challanNumber || '',
+      extractedClientName: doc.extractedClientName || '', productName: doc.productName || '',
+      quantity: doc.quantity || '', mrp: doc.mrp != null ? String(doc.mrp) : '',
     });
+    // Editing an existing document with a file already attached -- no fresh file to run
+    // extraction on, so just show the (possibly already-filled) fields directly rather than
+    // asking the extract-or-skip question again.
+    setExtractChoice(doc.fileName ? true : null);
     setDocStep(1);
     setShowModal(true);
   }
@@ -272,6 +401,15 @@ export default function DocumentManagement() {
       if (form.keywords)     fd.append('keywords',   form.keywords);
       if (form.tags?.length) fd.append('tags', form.tags.join(','));
       if (form.folderName.trim()) fd.append('folderName', form.folderName.trim());
+      // Challan-style fields only apply when the chosen folder is client-tagged.
+      if (selectedFolderClientName) {
+        if (form.extractedDate)         fd.append('extractedDate', form.extractedDate);
+        if (form.challanNumber.trim())  fd.append('challanNumber', form.challanNumber.trim());
+        if (form.extractedClientName.trim()) fd.append('extractedClientName', form.extractedClientName.trim());
+        if (form.productName.trim())    fd.append('productName', form.productName.trim());
+        if (form.quantity.trim())       fd.append('quantity', form.quantity.trim());
+        if (form.mrp.trim())            fd.append('mrp', form.mrp.trim());
+      }
       fd.append('uploadedBy', state.currentUser.fullName || state.currentUser.username);
       if (form.fileObj) fd.append('file', form.fileObj);
 
@@ -295,6 +433,12 @@ export default function DocumentManagement() {
         approvedBy: d.meta?.approvedBy || null,
         approvedOn: d.meta?.approvedOn || null,
         approvalNote: d.meta?.approvalNote || null,
+        extractedDate: d.meta?.extractedDate || null,
+        challanNumber: d.meta?.challanNumber || null,
+        extractedClientName: d.meta?.extractedClientName || null,
+        productName: d.meta?.productName || null,
+        quantity: d.meta?.quantity || null,
+        mrp: d.meta?.mrp ?? null,
         createdBy: 'system', createdOn: d.createdOn, updatedBy: 'system', updatedOn: d.createdOn,
       };
 
@@ -322,12 +466,38 @@ export default function DocumentManagement() {
   function handleFileDrop(e: React.DragEvent) {
     e.preventDefault(); setDragOver(false);
     const f = e.dataTransfer.files[0];
-    if (f) setForm(prev => ({ ...prev, fileName: f.name, fileSize: f.size, fileType: f.type, fileObj: f }));
+    if (f) { setForm(prev => ({ ...prev, fileName: f.name, fileSize: f.size, fileType: f.type, fileObj: f })); setExtractChoice(null); }
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
-    if (f) setForm(prev => ({ ...prev, fileName: f.name, fileSize: f.size, fileType: f.type, fileObj: f }));
+    if (f) { setForm(prev => ({ ...prev, fileName: f.name, fileSize: f.size, fileType: f.type, fileObj: f })); setExtractChoice(null); }
+  }
+
+  async function handleExtractChoice(shouldExtract: boolean) {
+    setExtractChoice(shouldExtract);
+    if (!shouldExtract || !form.fileObj) return;
+    setExtracting(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', form.fileObj);
+      const res = await axios.post('/api/documents/extract', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      setForm(prev => ({
+        ...prev,
+        extractedDate: res.data.date || '',
+        challanNumber: res.data.challanNumber || '',
+        extractedClientName: res.data.clientName || '',
+        productName: res.data.productName || '',
+        quantity: res.data.quantity || '',
+      }));
+      toast.success('Data extracted -- review and edit below before saving');
+    } catch (e) {
+      const msg = axios.isAxiosError(e) && e.response?.data?.error ? e.response.data.error : 'Failed to extract data from document';
+      toast.error(msg);
+      // Fields stay editable/blank so the user can still fill them in by hand.
+    } finally {
+      setExtracting(false);
+    }
   }
 
   function toggleTag(tagId: string) {
@@ -347,11 +517,66 @@ export default function DocumentManagement() {
     else toast.error('No file uploaded for this document');
   }
 
+  // Exports whatever's currently on screen (respects search/category/status filters and the
+  // folder being browsed) -- one row per document, with a clickable "Open Document" link that
+  // goes straight to the file. Uses the plain /uploads/... path (same one handlePreview opens
+  // directly) rather than the /api/documents/[id]/download route, since that route sits behind
+  // middleware.ts's JWT check -- a link opened outside the app (from Excel) carries no
+  // Authorization header and would just 401. The static file route has no such gate.
+  function exportToExcel() {
+    if (filtered.length === 0) { toast.error('No documents to export'); return; }
+
+    const rows = filtered.map((d, i) => {
+      const firm = firms.find(f => f.id === d.firmId);
+      const category = categories.find(c => c.code === d.categoryId);
+      const department = departments.find(dp => dp.code === d.departmentId);
+      const status = statuses.find(s => s.code === d.statusId);
+      return {
+        '#': i + 1,
+        'Document': d.title,
+        'Document Number': d.documentNumber,
+        'Firm': firm?.name || '',
+        'Folder': d.folderName || '',
+        'Category': category?.value || '',
+        'Department': department?.value || '',
+        'Status': status?.value || '',
+        'Issue Date': d.issueDate ? d.issueDate.slice(0, 10) : '',
+        'Expiry Date': d.expiryDate ? d.expiryDate.slice(0, 10) : '',
+        'File Name': d.fileName || '',
+        'File Size (KB)': d.fileSize ? Math.round(d.fileSize / 1024) : '',
+        'Uploaded By': d.uploadedBy || '',
+        'Upload Date': d.uploadDate ? d.uploadDate.slice(0, 10) : '',
+        'Challan No.': d.challanNumber || '',
+        'Challan Date': d.extractedDate ? String(d.extractedDate).slice(0, 10) : '',
+        'Client Name': d.extractedClientName || '',
+        'Product Name': d.productName || '',
+        'Quantity': d.quantity || '',
+        'MRP': d.mrp ?? '',
+        'Document Link': d.filePath ? 'Open Document' : 'No file attached',
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const linkColIndex = Object.keys(rows[0]).indexOf('Document Link');
+    filtered.forEach((d, i) => {
+      if (!d.filePath) return;
+      const cellRef = XLSX.utils.encode_cell({ r: i + 1, c: linkColIndex }); // +1 skips the header row
+      const cell = worksheet[cellRef];
+      if (cell) cell.l = { Target: `${window.location.origin}${d.filePath}`, Tooltip: 'Open document' };
+    });
+    worksheet['!cols'] = Object.keys(rows[0]).map(k => ({ wch: Math.max(k.length, 14) }));
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Documents');
+    const firmLabel = selectedFirm ? (firms.find(f => f.id === selectedFirm)?.name || 'Documents').replace(/[^\w.\- ]/g, '_') : 'All-Firms';
+    XLSX.writeFile(workbook, `documents-${firmLabel}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }
+
   function openBulkModal() {
     setBulkFiles([]);
     setBulkResults([]);
     setBulkProgress(0);
-    setBulkFolderName('');
+    setBulkFolderName(!showAllFiles ? currentFolderPath : '');
     setShowBulkModal(true);
   }
 
@@ -545,12 +770,28 @@ export default function DocumentManagement() {
             <Info size={16} /> Company Details
           </button>
           <button
-            onClick={() => { setNewFolderName(''); setShowFolderModal(true); }}
+            onClick={() => {
+              setEditingFolderId(null);
+              setNewFolderName('');
+              // Default to the client of the folder being browsed into -- a subfolder of a
+              // client-tagged folder should stay tagged to that same client unless changed.
+              setNewFolderClient((currentFolderId && folderById.get(currentFolderId)?.clientCode) || '');
+              setShowFolderModal(true);
+            }}
             className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium border transition ${
               darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
             }`}
           >
             <FolderPlus size={16} /> New Folder
+          </button>
+          <button
+            onClick={exportToExcel}
+            title="Export the documents currently shown to Excel, with a clickable link to each file"
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium border transition ${
+              darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <Download size={16} /> Export to Excel
           </button>
           <button onClick={openBulkModal} className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-xl text-sm font-medium hover:shadow-lg hover:shadow-violet-500/25 transition">
             <Upload size={16} /> Bulk Upload
@@ -563,14 +804,42 @@ export default function DocumentManagement() {
 
       {/* Folders -- shown as its own section, above search/filters, so every folder created
           for this firm is immediately visible (even with 0 documents in it yet) instead of
-          being buried as a small chip inside the filter panel below the search bar. */}
-      {folders.length > 0 && (
+          being buried as a small chip inside the filter panel below the search bar. Folders
+          can nest, so clicking one drills into it (revealing its own subfolders below) rather
+          than just filtering in place -- same tree-browsing idea as any file explorer. */}
+      {(folders.length > 0 || currentFolderId !== null) && (
         <div className={`${cardBg} rounded-2xl border p-4`}>
-          <p className={`text-xs font-semibold uppercase tracking-wider mb-3 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Folders</p>
+          <div className="mb-3">
+            <p className={`text-xs font-semibold uppercase tracking-wider mb-1.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Folders</p>
+            {currentFolderId !== null && (
+              <nav className="flex items-center gap-2 text-sm font-semibold flex-wrap">
+                <button onClick={() => setCurrentFolderId(null)}
+                  className={`hover:underline transition ${darkMode ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}>
+                  {firms.find(f => f.id === selectedFirm)?.name || 'Root'}
+                </button>
+                {breadcrumbChain.map((b, i) => {
+                  const isCurrent = i === breadcrumbChain.length - 1;
+                  return (
+                    <span key={b.id} className="flex items-center gap-2">
+                      <ChevronRight size={14} className={darkMode ? 'text-gray-600' : 'text-gray-400'} />
+                      {isCurrent ? (
+                        <span className={`font-bold ${darkMode ? 'text-white' : 'text-gray-900'}`}>{b.name}</span>
+                      ) : (
+                        <button onClick={() => setCurrentFolderId(b.id)}
+                          className={`hover:underline transition ${darkMode ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}>
+                          {b.name}
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
+              </nav>
+            )}
+          </div>
           <div className="flex flex-wrap gap-3">
-            <button onClick={() => setFilterFolder('all')}
+            <button onClick={() => { setShowAllFiles(true); setCurrentFolderId(null); }}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition ${
-                filterFolder === 'all'
+                showAllFiles
                   ? (darkMode ? 'border-blue-500 bg-blue-900/20' : 'border-blue-400 bg-blue-50')
                   : (darkMode ? 'border-gray-700 hover:bg-gray-700/40' : 'border-gray-200 hover:bg-gray-50')
               }`}>
@@ -582,22 +851,40 @@ export default function DocumentManagement() {
                 </p>
               </div>
             </button>
-            {folders.map(f => {
-              const count = activeDocuments.filter(d => d.firmId === selectedFirm && d.folderName === f.name).length;
-              const active = filterFolder === f.name;
+            {childFolders.map(f => {
+              const path = folderPath(f.id);
+              const count = activeDocuments.filter(d => d.firmId === selectedFirm && d.folderName === path).length;
+              const subCount = folders.filter(sf => sf.parentFolderId === f.id).length;
               return (
-                <button key={f.id} onClick={() => setFilterFolder(f.name)}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition ${
-                    active
-                      ? (darkMode ? 'border-blue-500 bg-blue-900/20' : 'border-blue-400 bg-blue-50')
-                      : (darkMode ? 'border-gray-700 hover:bg-gray-700/40' : 'border-gray-200 hover:bg-gray-50')
-                  }`}>
-                  <FolderIcon size={20} className={active ? 'text-blue-500' : (darkMode ? 'text-gray-400' : 'text-gray-500')} />
-                  <div>
-                    <p className={`text-sm font-medium truncate max-w-[160px] ${darkMode ? 'text-white' : 'text-gray-900'}`}>{f.name}</p>
-                    <p className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{count} files</p>
+                <div key={f.id} role="button" tabIndex={0}
+                  onClick={() => { setShowAllFiles(false); setCurrentFolderId(f.id); }}
+                  onKeyDown={e => { if (e.key === 'Enter') { setShowAllFiles(false); setCurrentFolderId(f.id); } }}
+                  className={`group flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition cursor-pointer ${darkMode ? 'border-gray-700 hover:bg-gray-700/40' : 'border-gray-200 hover:bg-gray-50'}`}>
+                  <FolderIcon size={20} className={darkMode ? 'text-gray-400' : 'text-gray-500'} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <p className={`text-sm font-medium truncate max-w-[160px] ${darkMode ? 'text-white' : 'text-gray-900'}`}>{f.name}</p>
+                      {f.clientName && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full whitespace-nowrap ${darkMode ? 'bg-violet-900/40 text-violet-300' : 'bg-violet-100 text-violet-600'}`}>
+                          {f.clientName}
+                        </span>
+                      )}
+                    </div>
+                    <p className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                      {count} files{subCount > 0 ? ` · ${subCount} subfolder${subCount > 1 ? 's' : ''}` : ''}
+                    </p>
                   </div>
-                </button>
+                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition">
+                    <button title="Rename / edit folder" onClick={e => { e.stopPropagation(); openEditFolder(f); }}
+                      className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-600 text-blue-400' : 'hover:bg-blue-50 text-blue-500'}`}>
+                      <Edit3 size={13} />
+                    </button>
+                    <button title="Delete folder" onClick={e => { e.stopPropagation(); setFolderToDelete({ id: f.id, name: f.name }); }}
+                      className={`p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-600 text-red-400' : 'hover:bg-red-50 text-red-500'}`}>
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -979,7 +1266,9 @@ export default function DocumentManagement() {
                 </label>
                 <select className={inp} value={form.folderName} onChange={e => setForm({ ...form, folderName: e.target.value })}>
                   <option value="">No Folder</option>
-                  {folders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                  {folderOptions.map(f => (
+                    <option key={f.id} value={f.path}>{'    '.repeat(f.depth)}{f.name}{f.clientName ? ` (${f.clientName})` : ''}</option>
+                  ))}
                 </select>
                 {folders.length === 0 && (
                   <p className={`text-[11px] mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
@@ -1007,6 +1296,76 @@ export default function DocumentManagement() {
                 <textarea className={`${inp} h-20 resize-none`} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Brief description of the document" />
               </div>
             </div>
+
+            {/* Client-folder extraction prompt -- only relevant when the chosen folder is
+                tagged to a specific client, a file has actually been attached, and it's a PDF
+                (the only format automatic extraction supports -- see /api/documents/extract).
+                "No" (or a non-PDF attachment) skips straight past this -- the document just
+                uploads normally, with no challan fields to fill in. */}
+            {(() => {
+              const isPdfAttached = !!form.fileObj && (form.fileType.includes('pdf') || form.fileName.toLowerCase().endsWith('.pdf'));
+              const showExtractPrompt = !!selectedFolderClientName && isPdfAttached && extractChoice === null;
+              const showChallanFields = !!selectedFolderClientName && extractChoice === true && !extracting;
+              return <>
+              {showExtractPrompt && (
+              <div className={`rounded-xl border p-4 ${darkMode ? 'border-blue-800 bg-blue-900/10' : 'border-blue-200 bg-blue-50'}`}>
+                <p className={`text-sm font-medium mb-3 ${darkMode ? 'text-blue-300' : 'text-blue-700'}`}>
+                  This folder is tagged to <span className="font-semibold">{selectedFolderClientName}</span>. Extract the date, challan number, client name, product name & quantity from this document?
+                </p>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => handleExtractChoice(true)}
+                    className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition">
+                    Yes, extract
+                  </button>
+                  <button type="button" onClick={() => handleExtractChoice(false)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${darkMode ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-300 text-gray-600 hover:bg-gray-100'}`}>
+                    No, upload directly
+                  </button>
+                </div>
+              </div>
+            )}
+
+              {extracting && (
+              <div className={`flex items-center gap-2 text-sm p-3 rounded-xl ${darkMode ? 'bg-gray-700/50 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+                <Loader2 size={16} className="animate-spin" /> Extracting data from the document...
+              </div>
+            )}
+
+              {showChallanFields && (
+              <div className={`rounded-xl border p-4 space-y-3 ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+                <p className={sec}>Challan Details -- extracted, review & edit before saving</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className={lbl}>Date</label>
+                    <input type="date" className={inp} value={form.extractedDate} onChange={e => setForm({ ...form, extractedDate: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className={lbl}>Challan No.</label>
+                    <input className={inp} value={form.challanNumber} onChange={e => setForm({ ...form, challanNumber: e.target.value })} placeholder="e.g. CH-2026-0142" />
+                  </div>
+                  <div>
+                    <label className={lbl}>Client Name</label>
+                    <input className={inp} value={form.extractedClientName} onChange={e => setForm({ ...form, extractedClientName: e.target.value })} placeholder="e.g. ABC Traders" />
+                  </div>
+                  <div>
+                    <label className={lbl}>Product Name</label>
+                    <input className={inp} value={form.productName} onChange={e => setForm({ ...form, productName: e.target.value })} placeholder="e.g. Office Chairs" />
+                  </div>
+                  <div>
+                    <label className={lbl}>Quantity</label>
+                    <input className={inp} value={form.quantity} onChange={e => setForm({ ...form, quantity: e.target.value })} placeholder="e.g. 50 pcs" />
+                  </div>
+                  <div>
+                    <label className={lbl}>
+                      MRP <span className={optBadge}>manual</span>
+                    </label>
+                    <input type="number" className={inp} value={form.mrp} onChange={e => setForm({ ...form, mrp: e.target.value })} placeholder="Enter MRP" />
+                  </div>
+                </div>
+              </div>
+            )}
+              </>;
+            })()}
           </div>
         )}
 
@@ -1161,6 +1520,12 @@ export default function DocumentManagement() {
                   ['Uploaded By', viewDoc.uploadedBy],
                   ['Upload Date', viewDoc.uploadDate ? viewDoc.uploadDate.split('T')[0] : '--'],
                   ...(viewDoc.keywords ? [['Keywords', viewDoc.keywords]] : []),
+                  ...(viewDoc.challanNumber ? [['Challan No.', viewDoc.challanNumber]] : []),
+                  ...(viewDoc.extractedDate ? [['Challan Date', String(viewDoc.extractedDate).split('T')[0]]] : []),
+                  ...(viewDoc.extractedClientName ? [['Client Name', viewDoc.extractedClientName]] : []),
+                  ...(viewDoc.productName ? [['Product Name', viewDoc.productName]] : []),
+                  ...(viewDoc.quantity ? [['Quantity', viewDoc.quantity]] : []),
+                  ...(viewDoc.mrp != null ? [['MRP', String(viewDoc.mrp)]] : []),
                 ] as [string, string][]).map(([label, value]) => (
                   <div key={label}>
                     <p className={`text-xs font-medium uppercase tracking-wider ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{label}</p>
@@ -1199,8 +1564,12 @@ export default function DocumentManagement() {
       </Modal>
 
       {/*  Bulk Upload Modal  */}
-      {/* - New Folder Modal - */}
-      <Modal isOpen={showFolderModal} onClose={() => { if (!creatingFolder) setShowFolderModal(false); }} title="New Folder">
+      {/* - New/Edit Folder Modal - */}
+      <Modal
+        isOpen={showFolderModal}
+        onClose={() => { if (!creatingFolder) { setShowFolderModal(false); setEditingFolderId(null); } }}
+        title={editingFolderId ? 'Edit Folder' : 'New Folder'}
+      >
         <div className="space-y-4">
           <div>
             <label className={lbl}>Folder Name</label>
@@ -1208,29 +1577,47 @@ export default function DocumentManagement() {
               className={inp}
               value={newFolderName}
               onChange={e => setNewFolderName(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleCreateFolder()}
+              onKeyDown={e => e.key === 'Enter' && handleSaveFolder()}
               placeholder="e.g. Renewal 2026"
               autoFocus
             />
             <p className={`text-xs mt-1.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-              For {firms.find(f => f.id === selectedFirm)?.name || 'this firm'}. Once created, it'll be selectable when uploading a document.
+              {editingFolderId ? (
+                <>Renaming also updates the folder path on every document already filed in it (or its subfolders).</>
+              ) : currentFolderId !== null ? (
+                <>Will be created inside <span className="font-medium">{currentFolderPath}</span>. Once created, it'll be selectable when uploading a document.</>
+              ) : (
+                <>For {firms.find(f => f.id === selectedFirm)?.name || 'this firm'}, at the top level. Once created, it'll be selectable when uploading a document.</>
+              )}
+            </p>
+          </div>
+          <div>
+            <label className={lbl}>
+              Client <span className={optBadge}>optional</span>
+            </label>
+            <select className={inp} value={newFolderClient} onChange={e => setNewFolderClient(e.target.value)}>
+              <option value="">No specific client</option>
+              {clients.filter(c => c.isActive).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <p className={`text-xs mt-1.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+              Tags this folder (and, unless changed, any subfolder created inside it) as holding only that client's documents.
             </p>
           </div>
           <div className="flex justify-end gap-3 pt-1">
             <button
-              onClick={() => setShowFolderModal(false)}
+              onClick={() => { setShowFolderModal(false); setEditingFolderId(null); }}
               disabled={creatingFolder}
               className={`px-4 py-2.5 rounded-xl text-sm font-medium disabled:opacity-40 ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'}`}
             >
               Cancel
             </button>
             <button
-              onClick={handleCreateFolder}
+              onClick={handleSaveFolder}
               disabled={creatingFolder}
               className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl text-sm font-medium hover:shadow-lg transition disabled:opacity-50"
             >
               {creatingFolder ? <Loader2 size={15} className="animate-spin" /> : <FolderPlus size={15} />}
-              {creatingFolder ? 'Creating...' : 'Create Folder'}
+              {creatingFolder ? (editingFolderId ? 'Saving...' : 'Creating...') : (editingFolderId ? 'Save Changes' : 'Create Folder')}
             </button>
           </div>
         </div>
@@ -1247,7 +1634,9 @@ export default function DocumentManagement() {
             <label className={lbl}>Move to</label>
             <select className={inp} value={moveTarget} onChange={e => setMoveTarget(e.target.value)}>
               <option value="">No Folder</option>
-              {folders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+              {folderOptions.map(f => (
+                <option key={f.id} value={f.path}>{'    '.repeat(f.depth)}{f.name}{f.clientName ? ` (${f.clientName})` : ''}</option>
+              ))}
             </select>
           </div>
           <div className="flex justify-end gap-3 pt-1">
@@ -1291,7 +1680,9 @@ export default function DocumentManagement() {
               </label>
               <select className={inp} value={bulkFolderName} onChange={e => setBulkFolderName(e.target.value)}>
                 <option value="">No Folder</option>
-                {folders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                {folderOptions.map(f => (
+                  <option key={f.id} value={f.path}>{'    '.repeat(f.depth)}{f.name}{f.clientName ? ` (${f.clientName})` : ''}</option>
+                ))}
               </select>
             </div>
           )}
@@ -1416,6 +1807,16 @@ export default function DocumentManagement() {
         }}
         title="Delete Document"
         message="Are you sure you want to delete this document? This cannot be undone."
+        isDanger
+      />
+
+      {/* Delete folder confirm */}
+      <ConfirmModal
+        isOpen={!!folderToDelete}
+        onClose={() => { if (!deletingFolder) setFolderToDelete(null); }}
+        onConfirm={handleDeleteFolder}
+        title="Delete Folder"
+        message={`Delete "${folderToDelete?.name}"? Only an empty folder (no documents, no subfolders) can be deleted -- move or delete its contents first if this fails.`}
         isDanger
       />
     </div>

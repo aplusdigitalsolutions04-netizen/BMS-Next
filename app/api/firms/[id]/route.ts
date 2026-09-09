@@ -90,7 +90,8 @@ export async function DELETE(
     dispatchNotification('Firm Removed', `Firm '${firmName}' has been successfully removed.`, body.uploadedBy)
 
     return NextResponse.json({ success: true })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to delete firm' }, { status: 500 })
   }
 }

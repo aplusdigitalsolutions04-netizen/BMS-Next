@@ -54,7 +54,8 @@ async function imgToDataUrl(filePath: string): Promise<string> {
       ext === 'gif'  ? 'image/gif'  :
       ext === 'webp' ? 'image/webp' : 'image/jpeg'
     return `data:${mime};base64,${buf.toString('base64')}`
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return ''
   }
 }

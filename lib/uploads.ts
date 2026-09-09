@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { query } from './db'
-import { uploadFileToDrive, deleteDriveFile, downloadDriveFile, updateDriveFileContent, findOrCreateFolder, moveDriveFile } from './googleDrive'
+import { uploadFileToDrive, deleteDriveFile, downloadDriveFile, updateDriveFileContent, findOrCreateFolder, moveDriveFile, renameFolderByName } from './googleDrive'
 
 // Kept only so pre-migration files that are still sitting on local disk keep working (the
 // serving route below falls back to this dir before checking Drive). New uploads never write
@@ -28,8 +28,18 @@ function sanitizeFilename(name: string): string {
 
 // Drive folder names can't contain "/" and shouldn't have leading/trailing whitespace -- a
 // firm named "A/B Traders" would otherwise silently create a nested "A" > "B Traders" pair.
+// Only used for names that are never meant to carry path structure (e.g. a firm's own name);
+// see splitFolderPath below for names that legitimately use "/" as a path separator.
 function sanitizeFolderName(name: string): string {
   return String(name || '').replace(/[\\/]/g, '-').trim()
+}
+
+// A document folder can nest inside another one -- its full location is stored (and passed
+// around as `subFolder`) as a single "/"-separated path, e.g. "Compliance/2024/Renewals".
+// Splits that into its individual segment names so each level can be created/found as its own
+// nested Drive folder.
+function splitFolderPath(path: string): string[] {
+  return path.split('/').map((seg) => seg.trim()).filter(Boolean)
 }
 
 // Drive subfolder each doc type is filed under, keyed by the `folder` option callers pass to
@@ -46,7 +56,7 @@ const DRIVE_FOLDERS: Record<string, string> = {
 // until later (a vendor responds to it), so there's no firm to nest it under at upload time.
 const FIRM_SCOPED_FOLDERS = new Set(['document', 'generatedDoc', 'template'])
 
-async function resolveParentFolderId(
+export async function resolveParentFolderId(
   folder?: string, companyName?: string | null, subFolder?: string | null
 ): Promise<string | undefined> {
   const folderName = folder && DRIVE_FOLDERS[folder]
@@ -60,10 +70,13 @@ async function resolveParentFolderId(
     parentId = await findOrCreateFolder(folderName)
   }
 
-  // User-named sub-folder (e.g. "Documents" -> "Renewal 2026") nested one level deeper --
-  // optional, so documents without one keep landing directly in the doc-type folder.
+  // User-named sub-folder (e.g. "Documents" -> "Renewal 2026" -> "Q1") -- optional, and can be
+  // nested arbitrarily deep (a "/"-separated path), so documents without one keep landing
+  // directly in the doc-type folder while a nested one walks/creates each level in turn.
   if (subFolder && subFolder.trim()) {
-    parentId = await findOrCreateFolder(sanitizeFolderName(subFolder.trim()), parentId)
+    for (const segment of splitFolderPath(subFolder)) {
+      parentId = await findOrCreateFolder(sanitizeFolderName(segment), parentId)
+    }
   }
 
   return parentId
@@ -123,6 +136,20 @@ export async function moveUploadedFileFolder(
   const parentFolderId = await resolveParentFolderId(folder, companyName, subFolder)
   if (!parentFolderId) return
   await moveDriveFile(rows[0].driveFileId, parentFolderId)
+}
+
+// Renames a document folder's matching Drive folder in place (same Drive folder id, so
+// everything already filed inside stays put) -- used when a document folder is renamed in the
+// app, so the Drive side doesn't silently drift into a same-named-but-different folder the
+// next time something is uploaded there. `parentPath` is the renamed folder's own parent path
+// (e.g. "Compliance" for a folder "2024" nested inside it), or null/'' for a top-level folder.
+export async function renameUploadedFolder(
+  companyName: string | null, parentPath: string | null, oldName: string, newName: string
+) {
+  if (oldName === newName) return
+  const parentFolderId = await resolveParentFolderId('document', companyName, parentPath)
+  if (!parentFolderId) return
+  await renameFolderByName(parentFolderId, sanitizeFolderName(oldName), sanitizeFolderName(newName))
 }
 
 // Overwrites a previously-uploaded file's content in place (same filename, same Drive file

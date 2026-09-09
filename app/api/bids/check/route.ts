@@ -13,7 +13,8 @@ export async function GET(req: NextRequest) {
     )
     const existing = rows[0] || null
     return NextResponse.json({ exists: !!existing, bid: existing })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Check failed' }, { status: 500 })
   }
 }

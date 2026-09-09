@@ -19,7 +19,8 @@ export async function GET() {
     }))
 
     return NextResponse.json(result)
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to fetch master data' }, { status: 500 })
   }
 }

@@ -30,6 +30,18 @@ export async function POST(req: NextRequest) {
       if (valid) {
         const hashed = await bcrypt.hash(password, 10)
         await query(`UPDATE user SET password = ? WHERE id = ?`, [hashed, user.id])
+        // One-time migration path for accounts created before bcrypt was enforced -- log it
+        // so a plaintext credential still sitting in an old DB backup is a visible, auditable
+        // event rather than a silent, untracked upgrade.
+        query(
+          `INSERT INTO auditlog (id, userId, userName, action, module, details, ipAddress, dateTime) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [
+            crypto.randomUUID(), user.id as string, user.fullName as string,
+            'LEGACY_PASSWORD_UPGRADED', 'Auth',
+            'Account logged in with a legacy plaintext password; it has now been hashed.',
+            req.headers.get('x-forwarded-for') || 'Unknown',
+          ]
+        ).catch((err) => console.error('Failed to log legacy password upgrade:', err))
       }
     }
 

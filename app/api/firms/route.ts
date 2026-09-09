@@ -2,9 +2,22 @@ import { NextRequest, NextResponse } from 'next/server'
 import { query } from '@/lib/db'
 import getPool from '@/lib/db'
 import { dispatchNotification } from '@/lib/email'
+import { requireAuth } from '@/lib/auth'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuth(req)
+    if (auth instanceof NextResponse) return auth
+
+    // A user restricted to specific firms must not be able to see the rest by calling the
+    // API directly -- the client previously did this filtering itself *after* fetching every
+    // firm, so the restriction was cosmetic only.
+    const restrictToIds = !auth.isAdmin && !auth.globalAccess ? (auth.firmAccess || []) : null
+    if (restrictToIds && restrictToIds.length === 0) return NextResponse.json([])
+
+    const scopeSql = restrictToIds ? `AND f.id IN (${restrictToIds.map(() => '?').join(',')})` : ''
+    const scopeParams = restrictToIds || []
+
     const firms = await query<Record<string, unknown>>(`
       SELECT f.*,
         md.code AS type_code, md.value AS type_value, md.groupCode AS type_groupCode,
@@ -12,10 +25,10 @@ export async function GET() {
       FROM firm f
       LEFT JOIN masterdata md ON f.firmTypeCode = md.code
       LEFT JOIN address a ON a.firmId = f.id
-      WHERE f.isDeleted = 0
+      WHERE f.isDeleted = 0 ${scopeSql}
       ORDER BY f.createdOn DESC
       LIMIT 500
-    `)
+    `, scopeParams)
 
     // Group addresses per firm
     const firmMap = new Map<string, Record<string, unknown>>()

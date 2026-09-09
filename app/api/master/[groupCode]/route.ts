@@ -11,7 +11,8 @@ export async function GET(
     const rows = await query<Record<string, unknown>>(`SELECT * FROM masterdata WHERE code = ?`, [code])
     if (rows.length === 0) return NextResponse.json({ error: 'Not found' }, { status: 404 })
     return NextResponse.json(rows[0])
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to fetch master data entry' }, { status: 500 })
   }
 }

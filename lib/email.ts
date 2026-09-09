@@ -46,39 +46,41 @@ export async function dispatchNotification(
   if (!t) return
 
   try {
-    const admins = await query<{ email: string }>(
-      `SELECT email FROM user WHERE roleCode IN ('ADMIN', 'MANAGER') AND isActive = 1`
-    )
-
-    const recipients = new Set(admins.map((a) => a.email))
-
-    if (uploaderId && uploaderId !== 'system') {
-      // Prefer an exact username match (unique) over fullName (which two active users
-      // could share) -- and only fall back to fullName when it uniquely identifies one
-      // active user, so a notification never goes to the wrong person's inbox.
-      const byUsername = await query<{ email: string }>(
-        `SELECT email FROM user WHERE username = ? AND isActive = 1 LIMIT 1`,
-        [uploaderId]
-      )
-      if (byUsername[0]?.email) {
-        recipients.add(byUsername[0].email)
-      } else {
+    // Admins/managers, the uploader's own email, and the email template are all independent
+    // lookups -- run them concurrently instead of as sequential round trips.
+    const [admins, uploaderEmail, tmplRows] = await Promise.all([
+      query<{ email: string }>(
+        `SELECT email FROM user WHERE roleCode IN ('ADMIN', 'MANAGER') AND isActive = 1`
+      ),
+      (async (): Promise<string | null> => {
+        if (!uploaderId || uploaderId === 'system') return null
+        // Prefer an exact username match (unique) over fullName (which two active users
+        // could share) -- and only fall back to fullName when it uniquely identifies one
+        // active user, so a notification never goes to the wrong person's inbox.
+        const byUsername = await query<{ email: string }>(
+          `SELECT email FROM user WHERE username = ? AND isActive = 1 LIMIT 1`,
+          [uploaderId]
+        )
+        if (byUsername[0]?.email) return byUsername[0].email
         const byFullName = await query<{ email: string }>(
           `SELECT email FROM user WHERE fullName = ? AND isActive = 1`,
           [uploaderId]
         )
-        if (byFullName.length === 1) recipients.add(byFullName[0].email)
-      }
-    }
+        return byFullName.length === 1 ? byFullName[0].email : null
+      })(),
+      query<{ metadata: string }>(
+        `SELECT metadata FROM masterdata WHERE code = 'EMAIL_TEMPLATE' LIMIT 1`
+      ).catch(() => []),
+    ])
+
+    const recipients = new Set(admins.map((a) => a.email))
+    if (uploaderEmail) recipients.add(uploaderEmail)
 
     const toEmails = Array.from(recipients).filter(Boolean)
     if (toEmails.length === 0) return
 
     let finalHtml: string | undefined
     try {
-      const tmplRows = await query<{ metadata: string }>(
-        `SELECT metadata FROM masterdata WHERE code = 'EMAIL_TEMPLATE' LIMIT 1`
-      )
       if (tmplRows[0]?.metadata) {
         const rawText = tmplRows[0].metadata.replace(/{{message}}/g, message)
         const parsed = await marked.parse(rawText, { breaks: true })

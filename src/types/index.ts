@@ -108,6 +108,15 @@ export interface FirmDocument {
   approvedBy?: string | null;
   approvedOn?: string | null;
   approvalNote?: string | null;
+  // Optional challan-style fields, only used for documents filed in a client-tagged folder --
+  // see app/api/documents/extract/route.ts. mrp is always typed by hand, the rest can be
+  // AI-extracted from an uploaded PDF and edited before saving.
+  extractedDate?: string | null;
+  challanNumber?: string | null;
+  extractedClientName?: string | null;
+  productName?: string | null;
+  quantity?: string | null;
+  mrp?: number | null;
   createdBy: string;
   createdOn: string;
   updatedBy: string;

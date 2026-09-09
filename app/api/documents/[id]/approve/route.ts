@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { query } from '@/lib/db'
+import { requirePermission } from '@/lib/auth'
 
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requirePermission(req, 'approve')
+    if (auth instanceof NextResponse) return auth
+
     const { id } = await params
     const { action, note, reviewedBy } = await req.json()
 

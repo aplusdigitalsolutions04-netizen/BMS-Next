@@ -1,14 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import { query } from '@/lib/db'
+import { requireAuth } from '@/lib/auth'
 
 export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAuth(req)
+    if (auth instanceof NextResponse) return auth
+
     const { id } = await params
-    const { fullName, email, roleCode, password, avatar, globalAccess, firmAccess } = await req.json()
+    const isSelf = auth.userId === id
+    if (!auth.isAdmin && !isSelf) {
+      return NextResponse.json({ error: 'You do not have permission to edit this user' }, { status: 403 })
+    }
+
+    const body = await req.json()
+    let { fullName, email, roleCode, password, avatar, globalAccess, firmAccess } = body
+    // Role and firm/global access are admin-only fields -- a non-admin editing their own
+    // profile (Profile.tsx) sends roleCode back unchanged, but must never be able to grant
+    // themselves a different role or wider firm access by tampering with the request body.
+    if (!auth.isAdmin) {
+      roleCode = undefined
+      globalAccess = undefined
+      firmAccess = undefined
+    }
 
     // Check email uniqueness
     if (email) {
@@ -92,14 +110,19 @@ export async function PUT(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAuth(req)
+    if (auth instanceof NextResponse) return auth
+    if (!auth.isAdmin) return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
+
     const { id } = await params
     await query(`UPDATE user SET isDeleted = 1 WHERE id = ?`, [id])
     return NextResponse.json({ success: true })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to delete user' }, { status: 500 })
   }
 }

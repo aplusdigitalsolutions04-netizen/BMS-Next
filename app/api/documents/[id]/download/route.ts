@@ -27,7 +27,8 @@ export async function GET(
         'Content-Type': (docMeta.fileType as string) || 'application/octet-stream',
       },
     })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return new NextResponse('Download failed', { status: 500 })
   }
 }

@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { query } from '@/lib/db'
+import { requireAdmin } from '@/lib/auth'
 
 export async function PATCH(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin(req)
+    if (auth instanceof NextResponse) return auth
+
     const { id } = await params
     const rows = await query<Record<string, unknown>>(`SELECT isActive FROM user WHERE id = ?`, [id])
     if (rows.length === 0) return NextResponse.json({ error: 'User not found' }, { status: 404 })
@@ -34,7 +38,8 @@ export async function PATCH(
       globalAccess: (userRow.globalAccess as number) !== 0,
       firmAccess: userRow.firmAccess ?? null,
     })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to toggle user status' }, { status: 500 })
   }
 }

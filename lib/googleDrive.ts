@@ -115,6 +115,32 @@ export async function findOrCreateFolder(name: string, parentId?: string): Promi
   return folderId!
 }
 
+// Renames the Drive folder named `oldName` under `parentId` to `newName`, in place -- the
+// Drive folder keeps the same id (and everything already filed inside it), only its name
+// changes. A no-op if no such folder exists yet (e.g. the app-side folder was renamed before
+// anything was ever uploaded into it, so there's nothing in Drive to rename).
+export async function renameFolderByName(parentId: string, oldName: string, newName: string): Promise<void> {
+  if (oldName === newName) return
+  const drive = await getDriveClient()
+  const escapedName = oldName.replace(/'/g, "\\'")
+  const res = await drive.files.list({
+    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and name='${escapedName}' and trashed=false`,
+    fields: 'files(id, name)',
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  })
+  const folderId = res.data.files?.[0]?.id
+  if (!folderId) return
+
+  await drive.files.update({ fileId: folderId, requestBody: { name: newName }, supportsAllDrives: true })
+
+  // findOrCreateFolder cached this folder under its old name -- drop that entry so a later
+  // upload doesn't keep resolving the stale name (and so a name collision with a genuinely
+  // different, not-yet-cached folder can't happen).
+  folderIdCache.delete(`${parentId}::${oldName}`)
+  folderIdCache.set(`${parentId}::${newName}`, folderId)
+}
+
 export async function uploadFileToDrive(buffer: Buffer, filename: string, mimeType?: string, parentFolderId?: string) {
   const drive = await getDriveClient()
   const res = await drive.files.create({

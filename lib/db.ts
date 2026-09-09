@@ -19,6 +19,15 @@ function parseDbUrl(url: string) {
 // module-level variable isn't the only thing keeping it alive.
 const globalForDb = global as unknown as { __mysqlPool?: mysql.Pool }
 
+// Set once startup migrations (ensureTables/ensureColumns/ensureProcedures/ensureSeedData)
+// are kicked off near the bottom of this module. query()/withTransaction() await it before
+// running so a request landing on a fresh process can't race the ALTER/CREATE statements
+// still in flight -- see the longer comment near where this promise is created.
+const globalForInit = global as unknown as { __dbInitPromise?: Promise<void> }
+async function waitForInit() {
+  if (globalForInit.__dbInitPromise) await globalForInit.__dbInitPromise.catch(() => {})
+}
+
 // Deferred until first actual query (not evaluated at module load) -- Next.js's build-time
 // "collecting page data" step imports every API route module just to inspect it, which would
 // otherwise crash the whole build the moment DATABASE_URL is missing from the deployment
@@ -51,6 +60,7 @@ function getPool(): mysql.Pool {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function query<T = unknown>(sql: string, params?: any[]): Promise<T[]> {
+  await waitForInit()
   try {
     const [rows] = await getPool().execute(sql, params)
     return rows as T[]
@@ -70,6 +80,7 @@ export async function withTransaction<T>(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fn: (exec: (sql: string, params?: any[]) => Promise<void>) => Promise<T>
 ): Promise<T> {
+  await waitForInit()
   const connection = await getPool().getConnection()
   try {
     await connection.beginTransaction()
@@ -242,6 +253,50 @@ async function ensureColumns() {
     // JSON array of LOCATION masterdata codes, so one entry can be tagged for many places.
     'ALTER TABLE `direct_link` ADD COLUMN taggedLocations TEXT',
     'ALTER TABLE `direct_link` ADD COLUMN catalogId VARCHAR(255)',
+    // Indexes on columns that are filtered/joined/sorted on every list request -- without
+    // these, MySQL falls back to a full table scan that gets slower as each table grows
+    // (documents/firms/audit log are re-fetched in full on every 30s poll).
+    'ALTER TABLE `document` ADD INDEX idx_document_firm_deleted (firmId, isDeleted)',
+    'ALTER TABLE `document` ADD INDEX idx_document_expiry (expiryDate)',
+    'ALTER TABLE `documentmeta` ADD INDEX idx_documentmeta_category (categoryCode)',
+    'ALTER TABLE `documentmeta` ADD INDEX idx_documentmeta_department (departmentCode)',
+    'ALTER TABLE `documentmeta` ADD INDEX idx_documentmeta_status (statusCode)',
+    'ALTER TABLE `documentmeta` ADD INDEX idx_documentmeta_approval (approvalStatus)',
+    'ALTER TABLE `user` ADD INDEX idx_user_deleted_active (isDeleted, isActive)',
+    'ALTER TABLE `user` ADD INDEX idx_user_role (roleCode)',
+    'ALTER TABLE `auditlog` ADD INDEX idx_auditlog_datetime (dateTime)',
+    'ALTER TABLE `auditlog` ADD INDEX idx_auditlog_user (userId)',
+    'ALTER TABLE `firm` ADD INDEX idx_firm_deleted (isDeleted)',
+    'ALTER TABLE `masterdata` ADD INDEX idx_masterdata_group_deleted (groupCode, isDeleted)',
+    'ALTER TABLE `bid_parameters` ADD INDEX idx_bidparam_biddoc (bidDocumentId)',
+    'ALTER TABLE `notification` ADD INDEX idx_notification_deleted_created (isDeleted, createdOn)',
+    // Notifications are a single shared feed (broadcast to everyone), but "mark read" /
+    // "clear" need to be per-viewer -- otherwise one user reading or clearing a notification
+    // hides it for every other user too. These track, per notification, which user ids have
+    // read/dismissed it, on top of the existing global isRead/isDeleted (which stay as an
+    // admin-only "remove for everyone" action).
+    'ALTER TABLE `notification` ADD COLUMN readBy JSON NULL',
+    'ALTER TABLE `notification` ADD COLUMN deletedBy JSON NULL',
+    // Lets a document_folder nest inside another one (folder-in-a-folder) -- NULL means a
+    // top-level folder for the firm. See app/api/document-folders/route.ts.
+    'ALTER TABLE `document_folder` ADD COLUMN parentFolderId VARCHAR(255) NULL',
+    'ALTER TABLE `document_folder` ADD INDEX idx_document_folder_parent (parentFolderId)',
+    // Tags a folder as belonging to one CLIENT masterdata entry (the same client list used by
+    // Direct Link), so a folder can be organized as "this client's documents only" -- purely
+    // an organizational label, shown on the folder tile; it doesn't restrict which documents
+    // can be filed inside it.
+    'ALTER TABLE `document_folder` ADD COLUMN clientCode VARCHAR(255) NULL',
+    'ALTER TABLE `document_folder` ADD INDEX idx_document_folder_client (clientCode)',
+    // Optional AI-extracted (or manually typed) challan-style fields for a document uploaded
+    // into a client-tagged folder -- see app/api/documents/extract/route.ts. mrp is always
+    // typed by hand (never extracted), the rest can be pre-filled from the uploaded PDF and
+    // edited before saving.
+    'ALTER TABLE `documentmeta` ADD COLUMN extractedDate DATE NULL',
+    'ALTER TABLE `documentmeta` ADD COLUMN challanNumber VARCHAR(255) NULL',
+    'ALTER TABLE `documentmeta` ADD COLUMN extractedClientName VARCHAR(255) NULL',
+    'ALTER TABLE `documentmeta` ADD COLUMN productName VARCHAR(255) NULL',
+    'ALTER TABLE `documentmeta` ADD COLUMN quantity VARCHAR(100) NULL',
+    'ALTER TABLE `documentmeta` ADD COLUMN mrp DECIMAL(12,2) NULL',
   ];
 
   for (const query of alters) {
@@ -249,7 +304,7 @@ async function ensureColumns() {
       await getPool().execute(query);
       console.log(`Successfully executed: ${query}`);
     } catch (e: any) {
-      if (e.code !== 'ER_DUP_FIELDNAME') {
+      if (e.code !== 'ER_DUP_FIELDNAME' && e.code !== 'ER_DUP_KEYNAME') {
         console.error(`Error executing auto-generate query (${query}):`, e.message);
       }
     }
@@ -473,7 +528,6 @@ export async function getBidStatusCodes(): Promise<string[]> {
 // (this one transitively included) without the runtime environment variables set yet.
 // Running it unconditionally would call getPool() immediately at import time and crash
 // the whole build the instant DATABASE_URL is missing.
-const globalForInit = global as unknown as { __dbInitPromise?: Promise<void> }
 if (process.env.DATABASE_URL) {
   globalForInit.__dbInitPromise ??= ensureTables().then(() => ensureColumns()).then(() => ensureProcedures()).then(() => ensureSeedData())
   globalForInit.__dbInitPromise.catch((err) => console.error('[db init] startup migration failed:', err))

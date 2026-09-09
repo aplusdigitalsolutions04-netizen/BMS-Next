@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import { query } from '@/lib/db'
+import { requireAuth } from '@/lib/auth'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuth(req)
+    if (auth instanceof NextResponse) return auth
+
     const users = await query<Record<string, unknown>>(
       `SELECT u.id, u.username, u.fullName, u.email, u.roleCode, u.isActive, u.lastLogin, u.avatar,
               u.globalAccess, u.firmAccess,
@@ -13,6 +17,10 @@ export async function GET() {
        WHERE u.isDeleted = 0`
     )
 
+    // Reports/BidAnalyser/SavedBids all read fullName/roleCode/lastLogin for every user to
+    // populate dropdowns and activity reports, so those stay visible to any authenticated
+    // user. globalAccess/firmAccess (which firms a restricted user can see) is the genuinely
+    // sensitive part -- only admins (who manage that access) get to see it for other users.
     const result = users.map(u => ({
       id: u.id,
       username: u.username,
@@ -23,18 +31,25 @@ export async function GET() {
       lastLogin: u.lastLogin,
       avatar: u.avatar,
       role: u.role_code ? { code: u.role_code, value: u.role_value, groupCode: u.role_groupCode } : null,
-      globalAccess: (u.globalAccess as number) !== 0,
-      firmAccess: u.firmAccess ?? null,
+      ...(auth.isAdmin || u.id === auth.userId ? {
+        globalAccess: (u.globalAccess as number) !== 0,
+        firmAccess: u.firmAccess ?? null,
+      } : {}),
     }))
 
     return NextResponse.json(result)
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to fetch users' }, { status: 500 })
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireAuth(req)
+    if (auth instanceof NextResponse) return auth
+    if (!auth.isAdmin) return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
+
     const { username, password, fullName, email, roleCode, globalAccess, firmAccess } = await req.json()
     if (!username || !password) {
       return NextResponse.json({ error: 'Username and password are required' }, { status: 400 })
@@ -43,15 +58,14 @@ export async function POST(req: NextRequest) {
     if (!email) return NextResponse.json({ error: 'Email is required' }, { status: 400 })
     if (!roleCode) return NextResponse.json({ error: 'Please select an access role' }, { status: 400 })
 
-    // Check uniqueness
-    const existing = await query<Record<string, unknown>>(
-      `SELECT id FROM user WHERE username = ? OR email = ?`,
+    // Check uniqueness -- one query returning the colliding row's own fields, instead of a
+    // second round trip just to figure out which of username/email collided.
+    const existing = await query<{ username: string; email: string }>(
+      `SELECT username, email FROM user WHERE username = ? OR email = ?`,
       [username, email]
     )
     if (existing.length > 0) {
-      // Determine which field
-      const byUsername = await query<Record<string, unknown>>(`SELECT id FROM user WHERE username = ?`, [username])
-      const what = byUsername.length > 0 ? 'username' : 'email'
+      const what = existing.some((u) => u.username === username) ? 'username' : 'email'
       return NextResponse.json({ error: `This ${what} is already in use` }, { status: 409 })
     }
 

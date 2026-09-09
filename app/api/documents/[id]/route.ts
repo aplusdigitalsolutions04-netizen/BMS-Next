@@ -25,11 +25,23 @@ export async function PUT(
     const tags = formData.get('tags') as string | null
     const file = formData.get('file') as File | null
     const folderName = formData.get('folderName') as string | null
+    const extractedDate = formData.get('extractedDate') as string | null
+    const challanNumber = formData.get('challanNumber') as string | null
+    const extractedClientName = formData.get('extractedClientName') as string | null
+    const productName = formData.get('productName') as string | null
+    const quantity = formData.get('quantity') as string | null
+    const mrp = formData.get('mrp') as string | null
 
     const safeCategoryCode = categoryCode && categoryCode !== '' ? categoryCode : null
     const safeDepartmentCode = departmentCode && departmentCode !== '' ? departmentCode : null
     const safeStatusCode = statusCode && statusCode !== '' ? statusCode : null
     const safeFolderName = folderName && folderName.trim() !== '' ? folderName.trim() : null
+    const safeExtractedDate = extractedDate && extractedDate.trim() !== '' ? new Date(extractedDate) : null
+    const safeChallanNumber = challanNumber && challanNumber.trim() !== '' ? challanNumber.trim() : null
+    const safeExtractedClientName = extractedClientName && extractedClientName.trim() !== '' ? extractedClientName.trim() : null
+    const safeProductName = productName && productName.trim() !== '' ? productName.trim() : null
+    const safeQuantity = quantity && quantity.trim() !== '' ? quantity.trim() : null
+    const safeMrp = mrp && mrp.trim() !== '' && !isNaN(Number(mrp)) ? Number(mrp) : null
 
     const safeIssueDate = issueDate && issueDate !== 'null' ? new Date(issueDate) : null
     const safeExpiryDate = expiryDate && expiryDate !== 'null' ? new Date(expiryDate) : null
@@ -49,6 +61,12 @@ export async function PUT(
       tags,
       uploadedBy,
       folderName: safeFolderName,
+      extractedDate: safeExtractedDate,
+      challanNumber: safeChallanNumber,
+      extractedClientName: safeExtractedClientName,
+      productName: safeProductName,
+      quantity: safeQuantity,
+      mrp: safeMrp,
     }
 
     if (file && file.size > 0) {
@@ -84,6 +102,7 @@ export async function PUT(
         dm.description, dm.keywords, dm.fileName, dm.fileSize, dm.fileType,
         dm.tags, dm.filePath, dm.uploadedBy, dm.uploadDate, dm.version, dm.folderName,
         dm.approvalStatus, dm.approvedBy, dm.approvedOn, dm.approvalNote,
+        dm.extractedDate, dm.challanNumber, dm.extractedClientName, dm.productName, dm.quantity, dm.mrp,
         cat.value AS cat_value, dept.value AS dept_value, stat.value AS stat_value
        FROM document d
        LEFT JOIN firm f ON d.firmId = f.id
@@ -121,6 +140,12 @@ export async function PUT(
         approvedBy: docRow.approvedBy,
         approvedOn: docRow.approvedOn,
         approvalNote: docRow.approvalNote,
+        extractedDate: docRow.extractedDate || null,
+        challanNumber: docRow.challanNumber || null,
+        extractedClientName: docRow.extractedClientName || null,
+        productName: docRow.productName || null,
+        quantity: docRow.quantity || null,
+        mrp: docRow.mrp ?? null,
         category: docRow.categoryCode ? { code: docRow.categoryCode, value: docRow.cat_value } : null,
         department: docRow.departmentCode ? { code: docRow.departmentCode, value: docRow.dept_value } : null,
         status: docRow.statusCode ? { code: docRow.statusCode, value: docRow.stat_value } : null,
@@ -155,7 +180,8 @@ export async function DELETE(
     }
 
     return NextResponse.json({ success: true })
-  } catch {
+  } catch (e) {
+    console.error("API error:", e)
     return NextResponse.json({ error: 'Failed to delete document' }, { status: 500 })
   }
 }

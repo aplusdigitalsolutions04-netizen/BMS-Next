@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { query, getBidStatusCodes } from '@/lib/db'
+import { query, getBidStatusCodes, withTransaction } from '@/lib/db'
 
 export async function GET() {
   try {
@@ -60,21 +60,29 @@ export async function POST(req: NextRequest) {
     const bidId = crypto.randomUUID()
     const bidTitle = title || fileName.replace(/\.pdf$/i, '')
 
-    await query(
-      `INSERT INTO biddocument (id, gemOrderId, title, fileName, filePath, uploadedBy, extractedSummary, offeredProduct, categoryCode, buyerTerms, bidStatus, createdOn)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [bidId, gemOrderId || null, bidTitle, fileName, filePath || '', uploadedBy || null, extractedSummary, offeredProduct || null, categoryCode || null, buyerTerms || null, bidStatus || null]
-    )
+    // Bid + its parameters are inserted atomically -- previously each parameter was inserted
+    // one row at a time with no transaction, so a crash or error partway through the loop left
+    // a bid row with only some of its parameters saved and nothing rolled back.
+    await withTransaction(async (exec) => {
+      await exec(
+        `INSERT INTO biddocument (id, gemOrderId, title, fileName, filePath, uploadedBy, extractedSummary, offeredProduct, categoryCode, buyerTerms, bidStatus, createdOn)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [bidId, gemOrderId || null, bidTitle, fileName, filePath || '', uploadedBy || null, extractedSummary, offeredProduct || null, categoryCode || null, buyerTerms || null, bidStatus || null]
+      )
 
-    if (parameters && Array.isArray(parameters)) {
-      for (const p of parameters as { name: string; value: string | null }[]) {
-        await query(
-          `INSERT INTO bid_parameters (gem_id, parameter_name, parameter_value, created_date, bidDocumentId) VALUES (?, ?, ?, NOW(), ?)`,
-          // gem_id is NOT NULL in the schema -- fall back to '' (not null) when no GEM Order ID was provided
-          [gemOrderId || '', String(p.name), p.value ? String(p.value) : null, bidId]
+      if (parameters && Array.isArray(parameters) && parameters.length > 0) {
+        const rows = parameters as { name: string; value: string | null }[]
+        // Single multi-row INSERT instead of one round trip per parameter.
+        const placeholders = rows.map(() => '(?, ?, ?, NOW(), ?)').join(', ')
+        const values = rows.flatMap((p) => [
+          gemOrderId || '', String(p.name), p.value ? String(p.value) : null, bidId,
+        ])
+        await exec(
+          `INSERT INTO bid_parameters (gem_id, parameter_name, parameter_value, created_date, bidDocumentId) VALUES ${placeholders}`,
+          values
         )
       }
-    }
+    })
 
     const [bid] = await query<Record<string, unknown>>(`SELECT * FROM biddocument WHERE id = ?`, [bidId])
     return NextResponse.json({ success: true, bid }, { status: 201 })
